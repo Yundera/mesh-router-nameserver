@@ -196,7 +196,128 @@ Files: `mesh-router-agent/src/index.ts`, `mesh-router-agent/src/services/`.
 
 ---
 
+## 5b. Phase 0 — non-breaking prep (do now)
+
+Everything here can land on `main` **today** as purely additive, "dark" groundwork:
+computed and observable, but consumed by nothing, so present behaviour is unchanged.
+The governing rule for every item is **expose, don't gate** — add fields, capabilities,
+and endpoints, but do not branch existing behaviour on them yet.
+
+### P0.1 — `dnsDirect` shipped dark (backend)
+
+- **Add response fields** to `GET /resolve/v2/:domain`: `dnsDirect` (default `false`)
+  and `directIp` (default omitted/`null`). Additive JSON keys are non-breaking —
+  `resolver.lua` and the CF Worker ignore unknown keys.
+- **Compute the flag for real, consume it nowhere.** Set it honestly so you can curl
+  the live fleet and see who *would* upgrade, before any traffic depends on it. This
+  is the highest-value prep step: it validates the heuristic against reality first.
+- **Extract a pure predicate** and unit-test it standalone:
+  ```ts
+  // mesh-router-backend/src/services/ — pure, no I/O
+  export function isDnsDirectEligible(
+    route: Route,
+    probe: { reachable443: boolean; reachable80: boolean },
+    validation: { trustedByPublicCa: boolean },
+    routesTtl: number,
+  ): boolean {
+    return route.type === "ip"
+      && isIPv4(route.ip) && !isLanOrReserved(route.ip)  // public IPv4 only
+      && probe.reachable443
+      && validation.trustedByPublicCa                     // real, browser-trusted cert
+      && routesTtl > 0;                                   // fresh registration
+  }
+  ```
+- **Annotate-only rule (critical):** when `RouteValidator.ts` gains
+  `trustedByPublicCa` (it already races system vs custom CA — just expose the
+  winner), it must **not** change which routes are accepted/rejected. Route
+  acceptance logic stays byte-for-byte as today; you are only recording metadata.
+
+### P0.2 — prober TLS/:443 as an opt-in capability (backend)
+
+- `Probe.ts` / `POST /probe` are on the bootstrap hot path (ICMP). **Do not change
+  their default behaviour.** Add a **separate** `probeTls(ip)` (TCP :443 + TLS
+  handshake, plus a :80 TCP check for HTTP-01) — or an opt-in `checks: [...]` param
+  that **defaults to today's ICMP-only**. Existing callers see no change.
+- Reuse `isLanOrReserved` + the existing rate limiter — no new attack surface.
+- **Compute eligibility off the registration hot path.** Do not make
+  `POST /routes/:userid/:sig` block on a new TLS handshake; run the probe/validate
+  **async / out-of-band** (or sampled) and write the flag when it completes. Keeps
+  registration latency unchanged.
+
+### P0.3 — agent `ask` endpoint (dead but tested)
+
+- Add the local `ask` HTTP endpoint to `mesh-router-agent`: returns yes/no for
+  `*.<own-user-domain>`. **Nothing calls it yet** (Caddy on-demand is repointed only
+  in §6 step 3 / item 4), so it is a dead-but-tested route — zero behavioural impact.
+- Optionally start emitting the public-IPv4 candidate as additive metadata.
+
+### P0.4 — cross-cutting groundwork (zero-risk)
+
+- **Shared response type:** define one TS interface for the `/resolve/v2` payload
+  (incl. the new fields) as the contract the future NS, CF Worker, and resolver agree
+  on. Prevents drift.
+- **Telemetry:** log/emit the computed `dnsDirect` per resolve so you get a real
+  number — *what fraction of the fleet qualifies* — which de-risks the whole design
+  before the NS is built. Pure observation.
+- **PSL submission for `nsl.sh`:** ops, not code, but the most time-sensitive prep
+  item (weeks to propagate) with zero present impact — start it today, in parallel.
+
+### Explicitly deferred (these CAN break the present — do not do in Phase 0)
+
+- ❌ Switching Caddy on-demand TLS from internal CA → real LE (item 4) — changes cert
+  issuance behaviour; only when ready to test end-to-end.
+- ❌ Delegating `nsl.sh` / creating `gw-edge.nsl.sh`.
+- ❌ Gating route acceptance on cert type.
+
+**Phase 0 exit criteria:** `curl /resolve/v2/<user>` shows an honest `dnsDirect`, you
+have a fleet-wide eligibility percentage from telemetry, the `ask` endpoint and TLS
+probe pass unit tests, and the PSL submission is filed — all with no change to any
+resolution served today.
+
+### Phase 0 status — IMPLEMENTED (2026-06-14)
+
+Code landed in `mesh-router-backend` and `mesh-router-agent`; all non-ops items
+done and unit-tested. Behaviour served today is unchanged (additive only).
+
+| Item | Status | Where |
+|---|---|---|
+| Pure `isDnsDirectEligible` predicate + tests | ✅ | `mesh-router-backend/src/services/DnsDirect.ts`, `src/tests/dnsdirect.spec.ts` |
+| `dnsDirect`/`directIp` exposed in `/resolve/v2` (default false/null) | ✅ | `RouterAPI.ts` |
+| `dnsDirect` also on `/domains/active` (dashboard fleet view) | ✅ | `RouterAPI.ts` |
+| Eligibility computed **off the hot path** (fire-and-forget after `POST /routes`) | ✅ | `RouterAPI.ts` → `computeAndStoreDnsDirect` |
+| `trustedByPublicCa` recorded in `RouteValidator` (**annotate-only**, accept/reject unchanged) | ✅ | `RouteValidator.ts` |
+| `probeTls` / `tlsHandshakeCheck` (:443 TLS trust + :80 TCP), opt-in, ICMP path untouched | ✅ | `Probe.ts` |
+| Telemetry log lines (per-resolve + per-register) | ✅ | `RouterAPI.ts` |
+| Agent `ask` endpoint, dead-but-tested, gated by `ASK_ENABLED` (default off) | ✅ | `mesh-router-agent/src/services/AskServer.ts`, `src/tests/ask-server.spec.ts` |
+| Shared response **type** as a standalone contract package | ⏳ deferred | the `/resolve/v2` JSON shape is the de-facto contract until the NS exists; promote to a shared type when the NS is built |
+| PSL submission for `nsl.sh` | ⏳ ops, pending | file at https://github.com/publicsuffix/list — start ASAP (weeks to propagate) |
+
+Eligibility status is cached in Redis at `dnsdirect:{userId}` with TTL = route
+TTL, so a box ages out of "eligible" on its own if it stops re-registering.
+
+#### Reality note — predicate gates on public IPv4, not `type === "ip"`
+
+The architecture-doc snippet gated on `route.type === "ip"`. In practice the
+agent registers **`nip.io`/`sslip.io` domain routes** (not bare `ip` routes —
+Caddy's non-SNI auto-TLS doesn't chain to the custom CA), and those domain
+routes still carry the box's own public IPv4 in `route.ip`. They are also the
+routes that actually get a publicly-trusted LE cert today.
+
+So the shipped predicate gates on **`route.ip` being a public IPv4** (the value a
+future NS would hand out) regardless of `type`, and `selectDirectCandidate()`
+picks the lowest-priority public-IPv4 route. This keeps the telemetry honest and
+useful (it measures real upgrade capability) instead of reading a constant
+`false`. The publicly-trusted-cert signal is taken from the live TLS handshake
+(validated against the domain route's SNI name) and falls back to the
+system-vs-custom-CA race already run during route validation. Fold this back
+into `docs/architecture.md` §10 when Path A is built for real.
+
+---
+
 ## 6. Suggested rollout order
+
+> Steps 1–2 are the **Phase 0** prep above (§5b) — non-breaking, do now. Steps 3+ are
+> the behaviour-changing cutover, gated until Phase 0 telemetry confirms the design.
 
 1. **PSL submission for `nsl.sh`** (long lead time — kick off immediately).
 2. **Backend `dnsDirect`** flag + extended probe/validator, shipped *dark* (computed
