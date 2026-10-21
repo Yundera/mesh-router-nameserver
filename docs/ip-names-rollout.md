@@ -121,6 +121,31 @@ from a template env value such as `IP_ZONE`; not built yet. Apps behind AppShiel
 this name still finish login on `<app>-<user>.<zone>` (registered redirect URI) until
 `ip.<zone>` joins the auth `REDIRECT_HOST_SUFFIXES`.
 
+### 2.6 Additive box config: `IP_ZONE` (2026-10-21)
+
+The fleet version of §2.5, with nip.io untouched:
+
+| Piece | Change |
+|---|---|
+| `mesh-router-agent` | `IP_ZONE` env: also registers `<ip-dashed>.<IP_ZONE>` routes (HTTPS + HTTP), one priority step behind nip.io (`buildAgentRoutes`). The backend validates each route on its own, so a zone route that fails leaves the nip.io ones in place |
+| `mesh-router-template-root` | `IP_ZONE` in the mesh `.env` (README key table) → agent env and `APP_IP_ZONE` in Maison's `.env.app`; `ensure-maison-stack.sh` asserts Maison's managed `routing`: gateway, nip, `ip` (only with `IP_ZONE`), sslip — hosts templated with `${APP_…}` |
+| `template-root` | `mesh.sh` writes `IP_ZONE=ip.<server domain>` into the mesh `.env` once `<box-ipv4-dashed>.ip.<server domain>` resolves to the box (`getent`); `.pcs.env` `IP_ZONE` overrides, empty turns it off; a failed lookup changes nothing |
+
+So prod boxes turn it on by themselves the night after §3.2 delegates `ip.nsl.sh`
+(today `ip.nsl.sh` resolves to Cloudflare's wildcard, so the probe says no).
+
+Tested on wisera with a `file://` tarball of the mesh template and a local agent image
+(`mesh-router-agent:1.1.1-ipzone-local`): the contract writer added only
+`IP_ZONE=ip.inojob.com` (second run: no change); the agent registered 4 routes and the
+backend accepted all 4 (`80-241-218-30.ip.inojob.com` at priority 2); Maison 1.1.80 took
+the managed routing ("Managed by Yundera"); immich got
+`caddy_3: immich-${APP_PUBLIC_IP_DASH}.${APP_IP_ZONE}` → `immich-80-241-218-30.ip.inojob.com`
+`200`; the worker path stayed `cf-worker,ip-dns,pcs`.
+
+Not covered yet: the platform stacks' own labels (`maison-…`, `auth-…` in the template
+compose files) — they are template-owned, not Maison-generated, and an empty `IP_ZONE`
+would leave a broken host there, so they need a conditional of their own.
+
 ## 3. Prod (nsl.sh) — cookbook
 
 Prod is read-first: **the user runs these steps.** Same shape as staging, plus a second
