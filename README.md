@@ -78,7 +78,10 @@ elsewhere in `mesh-router-root` — all detailed in
 mesh-router-nameserver/
 ├── README.md               ← you are here
 ├── docs/
-│   └── architecture.md     ← resolution flow, eligibility, cert bootstrap, fallback tiers
+│   ├── architecture.md     ← resolution flow, eligibility, cert bootstrap, fallback tiers
+│   ├── ip-names.md         ← stateless nip.io-style names (<app>-<ip>.ip.nsl.sh), CF test
+│   └── ip-names-rollout.md ← staging record + prod cookbook for the ip.<zone> nameserver
+├── deploy/                 ← compose for the ip.<zone> nameserver (sslip.io server), .env.example, peer file
 └── implementation_notes.md ← build plan, file-by-file mapping, rollout order, open questions
 ```
 
