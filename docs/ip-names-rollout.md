@@ -1,7 +1,9 @@
 # ip.<zone> nameserver — rollout cookbook
 
 **Status: LIVE ON STAGING 2026-10-21** (`inojob.com`, nameserver on the nasselle staging
-server, staging worker `a163fb13`). **Not on prod.** Prod is the user's to run, following §3.
+server, staging worker `a163fb13`) **and ON PROD 2026-10-22** (`nsl.sh`, one nameserver on
+`yundera-prod`, prod worker `d6b87118`, box side shipped on the `stable` channel). Prod
+record: §3.6.
 
 What this ships: the Cloudflare Worker reaches each PCS through our own nip.io-style
 subzone (`<app>-<ip>.ip.<zone>`) instead of nip.io. Design and the tests that justify it:
@@ -89,9 +91,9 @@ only, so `*.inojob.com` does not cover `x.ip.inojob.com`. New backend env var
 `CERT_EXTRA_SANS` (comma-separated DNS names, default none) adds names per deployment.
 
 - Staging backend (`/workspace/config/mesh-router/backend/docker-compose.yml`, backup
-  `docker-compose.yml.bak-2026-10-21-certsans`): `CERT_EXTRA_SANS=*.ip.inojob.com`, image
-  **`mesh-router-backend:2.0.24-certsans-local`** — v2.0.24 + this change, built locally
-  and `docker load`ed (the change is not committed or released yet).
+  `docker-compose.yml.bak-2026-10-21-certsans`): `CERT_EXTRA_SANS=*.ip.inojob.com`. First
+  run on a local build of v2.0.24 + this change; since the evening of 2026-10-21 on the
+  released `ghcr.io/yundera/mesh-router-backend:2.0.25`.
 - Boxes pick it up on their next certificate request (renewal, ≤ 72 h) or at once with
   `docker restart mesh-router-agent`. wisera: cert now
   `*.inojob.com, *.nip.io, *.ip.inojob.com, IP 80.241.218.30`.
@@ -117,9 +119,9 @@ The zone is spelled out in the domain entry because an app's environment has no
 variable carrying the server domain (`APP_DOMAIN` is `wisera.inojob.com`). For the fleet
 it should come from the deployment, as a managed setting the template writes (`maison
 settings set domains --owner Yundera`, or `routing` with Maison's new routing setting)
-from a template env value such as `IP_ZONE`; not built yet. Apps behind AppShield on
-this name still finish login on `<app>-<user>.<zone>` (registered redirect URI) until
-`ip.<zone>` joins the auth `REDIRECT_HOST_SUFFIXES`.
+from a template env value such as `IP_ZONE` — built the same day, §2.6. Apps behind
+AppShield on this name finish login on `<app>-<user>.<zone>` (registered redirect URI)
+until `ip.<zone>` is in the auth `REDIRECT_HOST_SUFFIXES` (§2.6).
 
 ### 2.6 Additive box config: `IP_ZONE` (2026-10-21)
 
@@ -131,8 +133,8 @@ The fleet version of §2.5, with nip.io untouched:
 | `mesh-router-template-root` | `IP_ZONE` in the mesh `.env` (README key table) → agent env and `APP_IP_ZONE` in Maison's `.env.app`; `ensure-maison-stack.sh` asserts Maison's managed `routing`: gateway, nip, `ip` (only with `IP_ZONE`), sslip — hosts templated with `${APP_…}` |
 | `template-root` | `mesh.sh` writes `IP_ZONE=ip.<server domain>` into the mesh `.env` once `<box-ipv4-dashed>.ip.<server domain>` resolves to the box (`getent`); `.pcs.env` `IP_ZONE` overrides, empty turns it off; a failed lookup changes nothing |
 
-So prod boxes turn it on by themselves the night after §3.2 delegates `ip.nsl.sh`
-(today `ip.nsl.sh` resolves to Cloudflare's wildcard, so the probe says no).
+So a box turns it on by itself at the first self-check after its zone's `ip.` subzone is
+delegated (§3.2) — on prod, from 2026-10-22.
 
 Tested on wisera with a `file://` tarball of the mesh template and a local agent image
 (`mesh-router-agent:1.1.1-ipzone-local`): the contract writer added only
@@ -142,14 +144,23 @@ the managed routing ("Managed by Yundera"); immich got
 `caddy_3: immich-${APP_PUBLIC_IP_DASH}.${APP_IP_ZONE}` → `immich-80-241-218-30.ip.inojob.com`
 `200`; the worker path stayed `cf-worker,ip-dns,pcs`.
 
-Not covered yet: the platform stacks' own labels (`maison-…`, `auth-…` in the template
-compose files) — they are template-owned, not Maison-generated, and an empty `IP_ZONE`
-would leave a broken host there, so they need a conditional of their own.
+Login redirects: mesh template `b8a4eb0` (2026-10-22) derives the auth
+`REDIRECT_HOST_SUFFIXES` from the same routing-domain list as Maison's `routing`
+(`ensure-routing-domains.sh`), so `<ip-dashed>.<IP_ZONE>` is an allowed callback host
+wherever the box routes apps on it. On `main` only as of 2026-10-22 (not in the `stable`
+promotion of §3.6): until it reaches `stable`, a login started on an `ip.<zone>` name
+finishes on `<app>-<user>.<zone>`.
+
+Not covered yet: the platform stacks' own labels (`maison-…`, `auth-…`, `mesh-console-…`,
+`admin-…`, `kopia-…` in the template compose files) — they are template-owned, not
+Maison-generated, and an empty `IP_ZONE` would leave a broken host there, so they need a
+conditional of their own. Those pages have no `ip.<zone>` name.
 
 ## 3. Prod (nsl.sh) — cookbook
 
-Prod is read-first: **the user runs these steps.** Same shape as staging, plus a second
-nameserver.
+Prod is read-first: **the user runs these steps** (or authorizes them for a session).
+Same shape as staging, plus an optional second nameserver. What was actually run on
+2026-10-22 is in §3.6.
 
 ### 3.0 Decide first
 
@@ -227,6 +238,9 @@ pnpm test
 pnpm deploy:prod
 ```
 
+The tests run against the top-level (prod) vars, so `vitest.config.mts` pins
+`IP_ZONE` empty through `miniflare.bindings`; the ip.<zone> tests set it themselves.
+
 ### 3.4 Verify
 
 ```bash
@@ -250,21 +264,52 @@ private IP → gateway).
 
 ### 3.4b Box certificates and direct names (optional, §2.5)
 
-1. Release `mesh-router-backend` with `CERT_EXTRA_SANS` (commit + tag → ghcr image) —
-   staging runs a local build until then.
-2. Prod backend env: `CERT_EXTRA_SANS=*.ip.nsl.sh`, image → the released tag, restart.
-   Boxes pick it up within 72 h (or `docker restart mesh-router-agent` per box).
-3. Maison domain on each box: needs the template to manage it (see §2.5); not a manual
-   per-box step for prod.
+1. Prod backend env: `CERT_EXTRA_SANS=*.ip.nsl.sh`, image → `mesh-router-backend:2.0.25`
+   (or later), restart. Boxes pick it up at their next certificate request (prod
+   `CERT_VALIDITY_HOURS=168`: within 7 days, at half-life) or at once with
+   `docker restart mesh-router-agent`.
+2. Box side: the `IP_ZONE` template changes (§2.6) reach customer boxes only through the
+   `stable` channel — fast-forward `stable` to `main` in `template-root` and
+   `mesh-router-template-root`. Each box enables it at its next self-check.
 
 ### 3.5 Rollback
 
 | Symptom | Action |
 |---|---|
-| Anything worker-related | remove `IP_ZONE` from prod vars and `pnpm deploy:prod`, or `npx wrangler rollback <previous-version>` — instant, back to nip.io |
+| Anything worker-related | remove `IP_ZONE` from prod vars and `pnpm deploy:prod`, or `npx wrangler rollback <previous-version>` — instant, back to nip.io. Prod's pre-rollout version: `6aeebfa1-cd93-4e96-b959-d101223243cf` |
 | Nameserver misbehaving | `docker compose down` on that host; the worker falls back on its own. Remove its `NS ip` record if it stays down |
 | Full undo | both of the above, then delete the `NS ip` and `A ns*-ip` records |
-| `CERT_EXTRA_SANS` | remove the variable and restart the backend; staging: restore `docker-compose.yml.bak-2026-10-21-certsans` (back to `ghcr.io/yundera/mesh-router-backend:2.0.24`) |
+| `CERT_EXTRA_SANS` | remove the variable and restart the backend; staging: restore `docker-compose.yml.bak-2026-10-21-certsans` (back to `ghcr.io/yundera/mesh-router-backend:2.0.24`); prod: restore `docker-compose.yml.bak-2026-10-22-certsans` (back to `2.0.23`) |
+| Box side | push `stable` back: `template-root` `8941772`, `mesh-router-template-root` `ebb98b8` (the pre-rollout tips); boxes follow at their next self-check |
+
+### 3.6 Prod record — as executed 2026-10-22
+
+| Step | What was done |
+|---|---|
+| 3.0 | One nameserver (`yundera-prod`) for now; second host deferred. Zone stays *Full* (§4.1) |
+| 3.1 | `/workspace/config/mesh-router-nsl/nameserver/` on `151.115.97.163`, container `nameserver-nameserver-1`; `.env` `NS_HOST=ns1-ip.nsl.sh`, `SOA_RNAME=dns.nsl.sh`, `SOA_SERIAL=2026102201`, no peer file. UDP + TCP 53 reachable from outside with no security-group change (the public IP sits on `eno1`) |
+| 3.2 | `A ns1-ip` → `151.115.97.163` (DNS only), `NS ip` → `ns1-ip.nsl.sh`. 1.1.1.1, 8.8.8.8 and 9.9.9.9 answered `app-1-2-3-4.ip.nsl.sh` → `1.2.3.4` within minutes |
+| 3.3 | Prod worker `d6b87118-f326-478d-9ccf-2abffa537d12` (gateway-cf `v1.1.4`), replacing `6aeebfa1` of 2026-06-03 — so the only code change was `bf5bb91` (v1.1.3) |
+| 3.4 | `cf-worker,ip-dns,pcs` on yunderalabs, yunderateam, holyhorse, watch (root, `maison-`, `auth-`); `nip` force → `cf-worker,nip.io,pcs`; same status and AppShield redirect on both paths; latency equal or lower. `wrangler tail`, 75 s of live traffic: 116 requests, 0 fallbacks |
+| 3.4b | Backend `2.0.23` → `2.0.25` + `CERT_EXTRA_SANS=*.ip.nsl.sh` (2.0.24 only adds a `reason` to availability answers). The prod compose files were CRLF — converted to LF on the way (backups `*.bak-2026-10-22-crlf`). holyhorse's new cert: `*.nsl.sh, *.nip.io, *.ip.nsl.sh, IP` |
+| Box side | holyhorse (main channel) self-check by hand: `IP_ZONE=ip.nsl.sh`, routes at priority 2, Maison routing with `ip`, `immich-161-97-177-252.ip.nsl.sh` `200`. Then `stable` fast-forwarded to `main` (`template-root` `8266bed`, `mesh-router-template-root` `284161a`) — also shipping Maison 1.1.76 → 1.1.80, agent 1.1.2, admin app 2.2.1. mestio and yunderalabs self-checked by hand: same result, every store app has its `ip.nsl.sh` name. The rest of the fleet follows at its 03:00 run |
+
+Side effects seen on the box side:
+
+- **Every app restarts once.** Saving the managed `routing` republishes all apps, so each
+  answers 502 for the length of its own start (Immich, Stirling-PDF: about a minute).
+- **A registry hiccup marks the run failed.** yunderalabs' `ensure-stack-pulled.sh` died
+  on a connection reset from ghcr.io (IPv6) pulling agent 1.1.2; `ensure-stack-up.sh` pulled
+  it later in the same run, so nothing was missing, but the run reports "completed with
+  failures".
+- **The republish exposed a store bug.** Apps whose database starts as root and drops to
+  its own uid while its data dir is listed in `x-compose-app.folders` (`$PUID`) get that dir
+  chowned under the running database: Redis/Valkey then refuse writes (`MISCONF`), MariaDB
+  cannot restart after its next stop (`tc.log`). Seen on yunderalabs (Docmost's Redis) and
+  holyhorse (Outline's Redis); MariaDB dirs on mestio, yunderalabs and holyhorse were handed
+  back to uid 999 before any restart. Store fixes: YunderaAppStore `16da613` (Docmost/Outline
+  Redis as `$PUID`) and the folder-entry removal for root-started databases. A box already in
+  that state needs `chown 999:999` on the MariaDB dir / a Redis restart.
 
 ## 4. Later (not part of this rollout)
 
@@ -284,8 +329,10 @@ private IP → gateway).
 
 ## 5. What was not tested
 
-- Prod (`nsl.sh`), its zone settings, and a two-server pair under real traffic (the
-  peer file was only checked locally: both NS and both glue records answered).
+- A two-server pair under real traffic (the peer file was only checked locally: both NS
+  and both glue records answered). Prod runs one nameserver.
+- On prod: a full login round-trip and a WebSocket app through the ip.<zone> path (both
+  passed on staging; on prod only the login redirect and a POST were checked).
 - IPv6 boxes through the ip.<zone> path (the name form `…-2001-bc8--1.ip.<zone>` resolves;
   no IPv6 box was online on staging).
 - `http://` (port 80) requests through the path — the code takes the route's scheme and

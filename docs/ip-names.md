@@ -1,8 +1,10 @@
 # IP-encoded names — our own nip.io
 
 > Design + test notes, 2026-10-21. **Live on staging** (nameserver on the nasselle
-> staging server, worker `IP_ZONE=ip.inojob.com`); rollout record and prod cookbook:
-> [`ip-names-rollout.md`](ip-names-rollout.md). §7 used an interim test nameserver on holyhorse.
+> staging server, worker `IP_ZONE=ip.inojob.com`) **and on prod since 2026-10-22**
+> (nameserver on `yundera-prod`, worker `IP_ZONE=ip.nsl.sh`); rollout record and prod
+> cookbook: [`ip-names-rollout.md`](ip-names-rollout.md). §7 used an interim test
+> nameserver on holyhorse.
 
 ## 1. Goal
 
