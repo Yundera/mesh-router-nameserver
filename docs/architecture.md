@@ -1,8 +1,10 @@
 # Architecture — mesh-router-nameserver
 
-> Design document, decided 2026-10-22. Nothing in this document is built yet except
-> the `ip.<zone>` nameserver it grows out of ([`ip-names.md`](ip-names.md), live on
-> staging and prod). It replaces the June 2026 design (per-user `dnsDirect` flag,
+> Design document, decided 2026-10-22; nameserver topology (§10) revised 2026-10-23:
+> stock PowerDNS everywhere, the backend writes to a hidden primary, the public
+> nameservers are zone-transfer secondaries. Nothing in this document is built yet
+> except the `ip.<zone>` nameserver it grows out of ([`ip-names.md`](ip-names.md), live
+> on staging and prod). It replaces the June 2026 design (per-user `dnsDirect` flag,
 > Cloudflare kept in front); §14 records what changed and why.
 
 ## 1. Goal
@@ -28,10 +30,10 @@ WireGuard tunnel.
 ```
                      DNS: A? immich.john.nsl.sh
                                 │
-                   ┌────────────▼─────────────┐
-                   │  mesh-router-nameserver  │  ◄── host state (backend)
-                   │  static zone + dynamic   │  ◄── TXT challenges (backend)
-                   └────────────┬─────────────┘
+                   ┌────────────▼─────────────┐     zone transfer   ┌────────────────┐
+                   │  ns1 / ns2 (PowerDNS,    │ ◄────────────────── │ hidden primary │ ◄── backend writes
+                   │  secondaries)            │   NOTIFY + AXFR     │ (backend stack)│     answers + TXT
+                   └────────────┬─────────────┘                     └────────────────┘
                  direct ?       │        otherwise / in doubt
               ┌─────────────────┴───────────────────┐
               ▼                                     ▼
@@ -51,6 +53,9 @@ WireGuard tunnel.
 | Topic | Decision |
 |---|---|
 | Zone ownership | The nameserver serves the entire zone, apex included. Registrar NS records point at it. |
+| DNS software | **Stock PowerDNS Authoritative 5.1** (`powerdns/pdns-auth-51`, 5.1.5 tested 2026-10-23), pinned, on every node. No DNS server of our own: the dynamic part lives in the backend (§10); the only code on the DNS path is a ~100-line Lua include for IP names (§10.2). |
+| Source of truth | **The backend.** It computes every record and writes it to a **hidden primary** (PowerDNS sidecar in the backend stack). The public nameservers are secondaries fed by NOTIFY + zone transfer (IP allowlist); they hold no state of their own (§10). |
+| DNSSEC | After the full zone move, not before (§10.5). PowerDNS online signing keeps the door open. |
 | Cloudflare | Dropped entirely. The Worker cannot survive: it runs only on proxied traffic, and proxying needs Cloudflare to be authoritative for the name (the route `*.nsl.sh/*` is bound to the Cloudflare zone). |
 | Gateway | `mesh-router-gateway` becomes the public edge (≥2 instances). SNI passthrough first, TLS termination as fallback (§6). |
 | DNS answers | Two only: box IP or gateway IP. Tunnel vs IP route is the gateway's business, never DNS's. |
@@ -109,8 +114,12 @@ cookie can be shared between a user's apps, and **any cookie set today with
   have to be `*.nsl.sh`, valid for every user's names;
 - `ip.nsl.sh` can get its own PSL entry, like `sslip.io`.
 
-These names are answered statelessly (the IP is in the name), exactly as the sslip.io
-server does today.
+The IP is in the name, but **only IPs registered by a real user's agent are
+answered** (decided 2026-10-23, against abuse: no answers for arbitrary or private
+IPs, no open nip.io for anyone's phishing or DNS rebinding). Any other IP-shaped
+name gets an empty answer. `ip.<zone>` stays a **separate zone**, delegated from the parent
+(`ip NS ns1, ns2`) and served **locally by each public nameserver** from one wildcard
+`LUA` record in the image config (§10.2): there is nothing to replicate.
 
 ### 3.4 Reserved labels
 
@@ -188,7 +197,7 @@ never the dashboard, so there is no admin role to build.
 ## 5. Where the decision comes from
 
 **A DNS server cannot see TLS, certificates or HTTP at query time**, so the decision is
-precomputed by the backend and the nameserver only reads it. And **the box's own
+precomputed by the backend and written into the zone as a plain `A` record (§10.3). And **the box's own
 report is never trusted**: the backend checks it from the outside.
 
 | Signal | How it is checked |
@@ -275,6 +284,10 @@ Rules:
   Nothing else: no other names, no other record types.
 - At most two TXT values per name (acme-dns semantics: the wildcard and the apex
   validate in the same order), **TTL 60 s**, deleted automatically after 10 minutes.
+- The value is written to the user's zone on the hidden primary at once and reaches
+  the secondaries by NOTIFY within seconds. Clients check propagation themselves
+  (Caddy/certmagic and lego query every authoritative nameserver before telling the
+  CA to validate), so the API returns as soon as the primary has it.
 - Rate limit per user (a few updates per hour is plenty: an order every ~60 days).
 - No CNAME delegation is needed (acme-dns normally asks for
   `_acme-challenge.<name> CNAME <uuid>.auth.example`); our nameserver answers the TXT
@@ -367,7 +380,7 @@ export, which becomes the first version of the git zone file.
 | `cf2024-1._domainkey` | TXT | DKIM key | Email Routing forwarding | dropped with Email Routing |
 | `s1._domainkey`, `s2._domainkey` | CNAME | `s{1,2}.domainkey.u49916735.wl236.sendgrid.net` | **SendGrid DKIM for app mail** | **copy, verified before delegation** |
 | `_dmarc` | TXT | `v=DMARC1; p=none;` | DMARC | copy |
-| `ns1-ip`, `ip` | A / NS | yundera-prod | `ip.nsl.sh` delegation | absorbed: the nameserver answers `ip.` itself |
+| `ns1-ip`, `ip` | A / NS | yundera-prod | `ip.nsl.sh` delegation | `ip NS ns1, ns2` in the parent; each public nameserver serves `ip.` locally (§10.2) |
 | `*` | A | Cloudflare proxy | every user name | replaced by dynamic answers |
 
 ### 9.2 Mail
@@ -385,42 +398,149 @@ export, which becomes the first version of the git zone file.
 
 ## 10. The nameserver itself
 
-### 10.1 What it serves
+### 10.1 Topology
 
-| Query | Source |
-|---|---|
-| SOA, NS, static records | zone file (git) |
-| user names (§3.1) | host state from the backend, §4.2 |
-| `<app>-<ip>.ip.<zone>` | computed from the name |
-| `_acme-challenge.<user>.<zone>` TXT | backend challenge store |
-| anything else | NXDOMAIN with SOA |
+```
+mesh-router-backend ── decision (§4), challenge store (§7.2), static zone (§9)
+   │  PowerDNS HTTP API, backend stack network only
+   ▼
+hidden primary: PowerDNS + SQLite, sidecar in the backend stack
+   │  not in any NS record, never queried by the public
+   │  NOTIFY + AXFR, primary allows transfers only from the secondaries' IPs
+   ├──► ns1: PowerDNS secondary  ─┐  public, in the registrar /
+   └──► ns2: PowerDNS secondary  ─┘  Cloudflare NS records
+```
 
-The sslip.io server running today for `ip.<zone>` covers only one row. The target is a
-single service covering all of them. Candidates:
+- **One writer.** Only the backend changes records, and only on the primary. The two
+  public nameservers never take writes and run a stock image: no code of ours sits on
+  the DNS path.
+- **Sync is the DNS protocol's job.** After each write the backend asks the primary
+  to NOTIFY (`PUT /zones/<zone>/notify`); each secondary compares SOA serials and
+  transfers the zone. A missed NOTIFY is caught by the primary's 60 s check cycle and
+  the secondaries' SOA refresh. There is no push from the backend to two servers for
+  us to keep consistent. Measured 2026-10-23: **~1 s** from API write to the new
+  answer on a secondary with the explicit notify; up to 60 s without it (an API write
+  alone sends no NOTIFY).
+- **Zone per user, also after the cutover.** The secondaries transfer whole zones
+  (AXFR observed, no IXFR), so a flip or a challenge moves only that user's handful of
+  records. One big `nsl.sh` zone would move every user's records on every change.
+- **Transfers are protected by IP, not TSIG.** PowerDNS's catalog consumer gives the
+  member zones it creates no `AXFR-MASTER-TSIG`, so with TSIG required the secondaries
+  can't transfer them (tested). The primary's `allow-axfr-ips` lists the secondaries,
+  the published port is firewalled to them, and the secondaries accept NOTIFY only from
+  the primary. Zone contents are public DNS data either way.
+- **The primary is disposable.** Every record it holds is derived from backend state
+  (Firestore, Redis, the zone file in git): a full reconcile (§10.3) rebuilds it from
+  an empty volume. Once DNSSEC is on, the signing keys become the only state that
+  must be backed up.
+- **New zones reach the secondaries by themselves**: the primary is a catalog-zone
+  producer (RFC 9432) and the secondaries consume it, so creating a user zone through
+  the API (with `catalog` set) is enough; it appears on the secondaries within the
+  primary's 60 s cycle, and a deleted zone disappears the same way (both tested).
+  The secondaries' config only knows the primary's address and the catalog name.
+- **A third-party secondary** (anycast, DDoS absorption) can be added later with no
+  change on our side: it is just another AXFR client.
 
-- **Own Go service on `miekg/dns`**: fits the rest of the stack, full control over
-  caching and fail-safe behaviour; DNSSEC would be our work.
-- **PowerDNS Authoritative** (bind backend for the zone file, remote/HTTP backend for
-  dynamic names): online DNSSEC signing for free, one more moving part.
+Placement: the primary runs next to the backend (prod: yundera-prod; staging:
+nasselle) and reaches the public secondaries over the internet on a non-standard port
+published only to their IPs. A secondary on the same host reaches it over the stack
+network instead.
 
-The zone has no DNSSEC today (no DS at the registrar), so it is not a launch blocker;
-pick with DNSSEC as a later step in mind.
+### 10.2 What each node serves
 
-### 10.2 Availability
+| Zone | Primary | ns1 / ns2 |
+|---|---|---|
+| `<user>.<zone>`, one per delegated user (§13.1) | written by the backend | secondary |
+| `<zone>` itself (after the cutover, §13.3) | static file from git + user records | secondary |
+| `ip.<zone>` | — | **local**: one wildcard `LUA` record from the image config |
+| `allow.<ip-zone>.invalid` (allowlist for `ip.<zone>`) | written by the backend | secondary |
+| catalog zone | producer | consumer |
+
+A delegated user's zone holds a handful of records, all written by the backend:
+
+| Name | Type | Value | TTL |
+|---|---|---|---|
+| `<user>.<zone>` | SOA, NS | PowerDNS SOA (serial bumped on every API change), `ns1`, `ns2` | 3600 |
+| `<user>.<zone>` | A | box IP or gateway IPs (§4.2) | 30 |
+| `*.<user>.<zone>` | A | same as the apex | 30 |
+| `<host>.<user>.<zone>` | A | only for a host whose answer differs from the user's (per-host force) | 30 |
+| `_acme-challenge.<user>.<zone>` | TXT | 0–2 challenge values (§7.2) | 60 |
+
+`ip.<zone>` is the one zone that can't be transferred: its names are unbounded. Each
+public node serves it from config, with no data to sync: a wildcard `LUA` record
+(`*.ip.<zone> LUA A ";return ipname4()"`, `AAAA ";return ipname6()"`) calling a Lua
+include shipped with the image (`deploy/secondary/lua/ipname.lua`). It follows
+sslip.io's rule: four octets joined by `-` (leftmost), else by `.` (leftmost), else one
+8-digit hex label; IPv6 in dashed form inside one label; no IP → empty answer.
+The parsed IP is then looked up (`dblookup`) in the allowlist zone: one plain
+`A`/`AAAA` record per allowed IP, `<key>.allow.<ip-zone>.invalid`, key = the dashed
+IPv4 (`161-97-177-252`) or the 32-digit expanded IPv6. Not listed → empty answer.
+The allowlist is its own zone, not records inside `ip.<zone>`, because PowerDNS
+refuses Lua records both through the API (`enable-lua-record-updates=no`) and in an
+incoming transfer: the Lua stays in the image, the backend only writes plain records
+(all tested 2026-10-23).
+PowerDNS's built-in `createForward()` was tested first and rejected: it answers
+`0.0.0.0`/`::` for names without an IP and misses dotted or IPv6 addresses after a
+prefix (20 of 35 hand-picked cases differ). Parity of the include with the sslip.io
+server running today, 2026-10-23: **579 of 581** queries identical
+(`test/ipname/`); the two differences are sslip.io's `MX 0 <name>` answers and its
+own NS glue, neither of which we serve. Gated, with every corpus IP allowed: every
+IP answer identical. Allow or remove an IP: 0.4–4 s to the secondaries' answer,
+up to ~21 s while the packet cache (20 s) still holds the previous empty answer. It needs `lua-records-exec-limit=20000` (the
+default 1000 fails 86 queries).
+
+### 10.3 The reconciler (backend)
+
+The dynamic part of the design is a backend service, not a DNS server feature:
+
+- **Desired state** per delegated user = §4.2 answer from Firestore (`dns` block),
+  Redis (probe state, route freshness) and the challenge store.
+- **Event-driven write**: a probe result, a force change, a TXT update, a
+  delegation or route expiry recomputes that user and `PATCH`es only the RRsets that
+  differ. Nothing changed → no write → no serial bump.
+- **Periodic full pass** (every minute over delegated users; cheap: one GET per
+  zone) repairs drift and catches route expiry, which has no event.
+- **Delegation on/off** creates/deletes the zone on the primary (with its catalog
+  membership); the secondaries follow.
+- **The `ip.<zone>` allowlist**: the public IPs of agent routes (`source: agent`,
+  signature-verified, `isLanOrReserved` filtered) of every registered user, kept for a
+  grace period after the last registration (`DNS_ALLOW_GRACE`, default 6 h: short
+  outages and backend restarts don't break names, little churn). Written on registration (new IP → allowed
+  within seconds) and pruned by the full pass. The whole allowlist zone is transferred
+  on each change; at a few thousand boxes, shard it (one zone per first octet).
+- The primary's API key and URL are backend env; the API is never published.
+
+### 10.4 Availability
 
 Once the apex is ours, a nameserver outage takes down the backend API and outbound
-mail as well as every app. Requirements:
+mail as well as every app.
 
-- **≥2 instances on different providers/networks**, both in the registrar NS set. Prod
-  runs one today (yundera-prod); the second host is still to be chosen.
-- Zone transfer cannot replicate dynamic answers, so **each instance has its own
-  backend client** with a serve-stale cache: last known answer, else gateway.
-- **Never block the DNS path on the backend.** Lookups are asynchronous with a short
-  timeout; the cache answers meanwhile.
-- Abuse: response rate limiting, negative caching, and no backend lookup at all for
-  names that cannot exist. Random-subdomain floods under a real user hit the cache.
+- **≥2 public secondaries on different providers/networks**, both in the NS set. Prod:
+  the new VPS and yundera-prod (hosts are managed separately). Staging runs one until a
+  second host is chosen.
+- **Backend or primary down** freezes the zone at its last state: the secondaries keep
+  answering until the SOA `expire` (set to 2 weeks); only changes stop (flips, new
+  challenges). Unlike the 2026-10-22 design there is no serve-stale fallback to the
+  gateway: a box that goes offline during the outage keeps its `direct` answer until
+  the backend is back. Acceptable, since the gateway resolves through the backend too.
+- **Abuse**: PowerDNS packet cache, response rate limiting (dnsdist in front if
+  needed later), no backend involvement at query time at all.
 
-### 10.3 IPv4 only
+### 10.5 DNSSEC
+
+Not before the full zone move:
+
+- During the per-user bridge the parent zone stays on Cloudflare, so a signed user zone
+  would need a DS record per user in Cloudflare for little gain.
+- **Never change the nameservers and DNSSEC in the same step.** If Cloudflare signs the
+  zone at cutover time, either run a multi-signer transition (RFC 8901) or remove the
+  DS at the registrar and wait out its TTL before switching.
+- When enabled: online signing on the primary, a single CSK (ECDSA P-256), no
+  scheduled rollover; the secondaries receive signed transfers. `ip.<zone>` is signed
+  locally on each public node with the same key, installed from a secret. The `.sh`
+  registry and our registrar must accept DS records (to check).
+
+### 10.6 IPv4 only
 
 Direct answers are `A` only, as before. `AAAA` for boxes with public IPv6 is a later
 extension; it needs the same probe on v6.
@@ -429,8 +549,8 @@ extension; it needs the same probe on v6.
 
 | Component | Change |
 |---|---|
-| **mesh-router-nameserver** | Grows from the sslip.io server for `ip.<zone>` to the whole zone: static file, dynamic names, IP names, challenge TXT (§10). |
-| **mesh-router-backend** | Per-host state + probes (§4, §5); hostnames in route registration; acme-dns API + challenge store (§7.2); force overrides; `mesh-cli dns` admin commands; reserved labels at signup (§3.4). |
+| **mesh-router-nameserver** | No DNS code: PowerDNS config and deploy files for the hidden primary (backend sidecar) and the public secondaries, the `ip.<zone>` LUA zone, the static zone file and its checks (§10). |
+| **mesh-router-backend** | Per-host state + probes (§4, §5); hostnames in route registration; acme-dns API + challenge store (§7.2); force overrides; the **zone reconciler** writing to the hidden primary (§10.3); `mesh-cli dns` admin commands; reserved labels at signup (§3.4). |
 | **mesh-router-gateway** | Public edge: ACME forwarding, SNI passthrough, termination fallback with DNS-01 certs, rate limits, ≥2 instances (§6). |
 | **mesh-router-caddy** | Pinned xcaddy build with `caddy-dns/acmedns`; wildcard site block; entrypoint passes the user zone SNIs through instead of pinning cert0 (C3); real-LE on-demand for HTTP-01 names (§7.3, §7.4). |
 | **mesh-router-agent** | Sends hostnames with route registration; hints the backend on cert change. |
@@ -443,12 +563,14 @@ extension; it needs the same probe on v6.
 
 | Failure | Behaviour |
 |---|---|
-| Backend unreachable | Nameserver serves cached answers, else gateway. Gateway serves its cached routes. |
+| Backend or hidden primary down | Zone frozen at its last state; secondaries keep answering until SOA expire (2 weeks). No flips, no new challenges. Gateway serves its cached routes. |
+| Primary volume lost | Recreated empty; the backend's full reconcile rewrites every zone, the secondaries pull the result. |
+| Backend down, box changes IP | Its new `<app>-<ip>.ip.<zone>` names answer empty until the backend is back (allowlist frozen). The old IP stays allowed. |
 | Box offline | Route expires → gateway → gateway shows the offline/landing page. |
 | Cert issuance fails | Stays gateway. Invisible to the user; visible in the dashboard `reason`. |
 | Cert about to expire | Downgraded to gateway before `notAfter` (margin), back up once renewed. |
-| One nameserver down | The other answers. |
-| Both nameservers down | Everything under the zone fails, apex and mail included. This is why §10.2 is a hard requirement. |
+| One public nameserver down | The other answers; the returning one catches up by IXFR. |
+| Both nameservers down | Everything under the zone fails, apex and mail included. This is why §10.4 is a hard requirement. |
 | One gateway down | Clients retry the second `A`; remove it from the answer when its health check fails. |
 | Gateway flooded | Direct boxes are unaffected; gateway-routed names degrade. |
 | Stolen box credential | Can publish TXT for that one user (and already could register its routes). Revoke via `pcs revoke` / key rotation. |
@@ -485,9 +607,9 @@ Ships to prod with no change for any user who is not delegated. Staging test use
 | Naming | Dot form rendered **alongside** the dash form for app routes, **on delegated boxes only and once their wildcard exists**; auth registrar accepts dot-form redirect hosts. Platform stacks stay dash-form until Phase 2 | Dot-form names already resolve to Cloudflare for everyone (the `*.<zone>` wildcard matches any depth), so a non-delegated box rendering them would make Caddy order a cert per app through the Worker and drain the shared Let's Encrypt bucket. Non-delegated boxes render nothing new |
 | Naming | Reserved labels + no-dash rule at signup (§3.4); audit existing usernames | Signup-only |
 | Naming | Cookie check (AppShield gates host-only; Authelia already is) and PSL submission (in progress) | No change |
-| Nameserver | Own service replaces the stock sslip.io server, first as a drop-in for `ip.<zone>` compared answer for answer, then serving delegated user zones and challenge TXT | `ip.<zone>` answers unchanged |
+| Nameserver | PowerDNS secondaries replace the stock sslip.io server on the public NS hosts: `ip.<zone>` from the LUA wildcard, compared answer for answer with the sslip.io server first; delegated user zones and challenge TXT by transfer from the hidden primary in the backend stack | `ip.<zone>` answers unchanged; user zones exist only for delegated users |
 | Nameserver | Static zone file in git from the Cloudflare export, checked in CI against live Cloudflare answers, not served | Not served |
-| Nameserver | Metrics, external DNS monitor, shadow log of the answer it would give for every user | Observation only |
+| Nameserver | Metrics, external DNS monitor (SOA serial of primary vs every secondary), shadow log in the backend of the answer each user would get | Observation only |
 | Backend | Hostnames in route registration (optional field), per-host state, probes, force overrides, acme-dns API, new `/resolve/v2` fields | Additive; old agents and gateways ignore them |
 | Box | Pinned xcaddy image with `caddy-dns/acmedns`; wildcard site block enabled only for delegated boxes (flag in the mesh `.env`, set by Yundera); agent sends hostnames | Same behaviour as today otherwise, with a pinned tag |
 | Gateway | Delegated names go through the **existing** Traefik + OpenResty: Traefik gets a DNS-01 resolver (lego `httpreq` against the backend) and one router per delegated user. OpenResty only gets hygiene fixes. The edge mode (SNI passthrough, ACME forwarding) is Phase 2: passthrough to NAT boxes needs tunnel work, and ACME forwarding only serves HTTP-01, which Phase 1 doesn't use | Routers for delegated names only; other traffic unchanged |
@@ -520,4 +642,5 @@ static zone file in sync; then the same on prod with pilot users.
 | HTTP-01 only, DNS-01 rejected (needed a custom Caddy build; NAT boxes couldn't use direct anyway) | Owning the zone makes DNS-01 cheap, a wildcard per user removes per-app issuance and most rate-limit pressure, and NAT boxes benefit too (TLS passthrough). The custom build is a short Dockerfile change that also pins the image |
 | DNS switched to the box first, cert issued on the first hit | Cert first (DNS-01, or HTTP-01 forwarded by the gateway), DNS switched only after the backend verifies it: no window without a cert |
 | Dash-form names | Dot form canonical (wildcard-coverable), dash form as alias |
-| `ip.<zone>` delegated as a separate subzone | Absorbed into the main zone; same names |
+| `ip.<zone>` delegated as a separate subzone | Still a separate zone, now served by the same public nameservers from a local LUA wildcard; same names |
+| (2026-10-22) Own Go nameserver on `miekg/dns`, each instance pulling from the backend with a serve-stale cache | (2026-10-23) Stock PowerDNS everywhere; the backend writes to a hidden primary in its own stack, the public nameservers are secondaries (IP-allowlisted transfers, catalog zone). A tested base with DNSSEC available, no DNS server of ours (one Lua include for IP names), and no two-writer sync problem |

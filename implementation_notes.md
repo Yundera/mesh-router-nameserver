@@ -3,6 +3,9 @@
 > The file-by-file plan for Phase 1 of [`docs/architecture.md`](docs/architecture.md)
 > (§13.2). Written 2026-10-22 from a read of the code at that date; `file:line`
 > references are relative to `mesh-router-root/` unless stated otherwise.
+> **Revised 2026-10-23:** the nameserver is stock PowerDNS (hidden primary in the
+> backend stack + public secondaries, architecture §10); N1, N2, B3–B5, B9 and the
+> checklist follow. DNSSEC stays out of Phase 1.
 > **Staging (`inojob.com`) first, test user wisera.** Prod only once staging is
 > confirmed. Replaces the June 2026 notes (per-user `dnsDirect`, "Path A"): their
 > Phase 0 (P0.1–P0.4) was marked implemented on 2026-06-14 but is not what the code
@@ -41,8 +44,11 @@ These facts shape the plan more than the design does:
   already parses dot form. The OpenResty edge mode (SNI passthrough, ACME
   forwarding) moves to Phase 2: passthrough needs tunnel work (§0) and ACME
   forwarding only serves HTTP-01, which Phase 1 doesn't use.
-- **Nameserver in Go** (`miekg/dns`), like Maison and mesh-console. DNSSEC is not on
-  the zone today; PowerDNS stays the fallback if that changes the calculus later.
+- **Stock PowerDNS, no DNS code of ours** (revised 2026-10-23; replaces the Go
+  `miekg/dns` service). The backend is the only writer, through the API of a hidden
+  primary that ships as a sidecar of the backend stack; the public nameservers are
+  PowerDNS secondaries (NOTIFY + AXFR, IP allowlist, catalog zone). Same image everywhere.
+  DNSSEC only after the full zone move (architecture §10.5).
 - **No new Firestore collection**: delegation and force live on the existing
   `nsl-router/{uid}` document; probe results in Redis.
 
@@ -53,35 +59,44 @@ why it is compatible, and tests.
 
 ### N — mesh-router-nameserver
 
-**N1. Own DNS service** (new code in this repo: `cmd/nameserver/`, `internal/…`,
-`Dockerfile`, CI publishing `ghcr.io/yundera/mesh-router-nameserver`).
+**N1. PowerDNS config** (this repo: `deploy/primary/`, `deploy/secondary/`, no
+code). Image `powerdns/pdns-auth-<major>` pinned by digest, the same on every node.
 
-- `internal/ipname`: IP-encoded names with sslip.io parity as specified in
-  [`docs/ip-names.md`](docs/ip-names.md) §2 (dashed, dotted, hex IPv4; dashed IPv6;
-  any prefix labels). TTL as today.
-- `internal/userzone`: any `<label>.<zone>` queried is treated as a delegated zone
-  apex: synthesized SOA/NS (AA set), `A` for the apex and `*.<label>` per the backend
-  answer, `TXT` for `_acme-challenge.<label>.<zone>`. No backend lookup for names
-  that can't be users (invalid label, reserved). Only delegated users' queries ever
-  arrive, since Cloudflare holds the rest of the zone.
-- `internal/backend`: client for B4, cache per user (fresh 15 s, serve stale up to
-  1 h, async refresh, 1 s timeout). Backend down and nothing cached → gateway IPs.
-- Shadow log: one line per user per refresh, "would answer X because Y".
-- Metrics: queries by type/result, backend latency, cache hit ratio (Prometheus text
-  on a local port).
-- Flags/env: `ZONES` (`inojob.com`), `IP_ZONE` (`ip.inojob.com`), `NS_HOSTS`,
-  `SOA_RNAME`, `BACKEND_URL`, `SERVICE_API_KEY`, `GATEWAY_IPS` (fallback if B4 is
-  unreachable at start), `LISTEN`.
-- **Compatibility:** deployed first as a drop-in for `ip.inojob.com` only.
-- **Tests:** table tests for ip names; a corpus diff against the running sslip.io
-  container (`scripts/diff-sslip.sh`: same query list, both servers, compare
-  answers) is the gate for the swap; userzone tests with a fake backend.
+Settled by test on 2026-10-23 (harness `/d/workspace/tmp-claude/pdns-ipname/`):
+`powerdns/pdns-auth-51` (5.1.5 tested; pin the current 5.1.x by digest at build).
 
-**N2. Deploy** (`deploy/docker-compose.yml`, `.env.example`, `docker-compose.peer.yml`).
-Image switches from `cunnie/sslip.io-dns-server@sha256:…` to N1. Keep the
-`${PUBLIC_IP}:53` binding (systemd-resolved holds 127.0.0.53). Add the backend env
-and the mesh-internal network so it reaches `mesh-router-backend` by name on the same
-host.
+- `deploy/primary/`: compose fragment to merge into the backend stack
+  (`pdns-primary` service, SQLite volume, `api=yes` + `api-key` + `webserver` on the
+  stack network only, `primary=yes`, `allow-axfr-ips` + `also-notify` = the
+  secondaries' IPs, catalog producer zone `catalog.<zone>.invalid` (`pdnsutil zone
+  set-kind … producer`), `default-soa-content=<ns1> hostmaster.@ 0 900 900 1209600 30`,
+  `default-soa-edit-api=DEFAULT`). Port 53 published on a non-standard host port,
+  firewalled to the secondaries. **No TSIG**: catalog member zones on the consumer get
+  no `AXFR-MASTER-TSIG`, so required TSIG blocks their transfers (tested).
+- `deploy/secondary/`: `secondary=yes`, catalog consumer of the primary
+  (`zone create-secondary catalog.<zone>.invalid <primary>` + `set-kind … consumer`),
+  `allow-notify-from` = the primary; `enable-lua-records=yes`,
+  `lua-global-include-dir` → `deploy/secondary/lua/` (**`ipname.lua`, written and
+  tested**, gated on the allowlist zone below), `lua-records-exec-limit=20000`; a
+  start hook that creates `ip.<zone>` as a **native** zone idempotently (SOA/NS +
+  `*.ip.<zone> LUA A ";return ipname4()"` and `AAAA ";return ipname6()"`, TTL 300).
+  `enable-lua-record-updates` stays **off** on every node: Lua never travels by API or
+  transfer.
+- Primary start hook also creates `allow.<ip-zone>.invalid` (kind **primary** —
+  `pdnsutil zone create` makes a native zone, which a catalog ignores — and catalog
+  member); the backend fills it (B5). Env: `ZONE`, `IP_ZONE`, `NS_HOSTS`, `SOA_RNAME`,
+  `PRIMARY_ADDR`, `PUBLIC_IP`.
+- **Gate for the swap:** `test/ipname/` (corpus + `diff.sh`, README with the run
+  commands): 579/581 identical to the sslip.io server, the 2 differences expected.
+  Rerun against the real deploy before switching `ns-ip.inojob.com`.
+- No shadow log or backend client here any more: the shadow log moves to the
+  backend reconciler (B5), metrics come from PowerDNS's own `/metrics` webserver.
+
+**N2. Deploy** (`deploy/docker-compose.yml` → `deploy/secondary/docker-compose.yml`).
+The public NS hosts switch from `cunnie/sslip.io-dns-server@sha256:…` to the N1
+secondary. Keep the `${PUBLIC_IP}:53` binding (systemd-resolved holds
+127.0.0.53). On nasselle, the secondary reaches the primary over the backend stack
+network; on any other host, over the published primary port.
 
 **N3. Static zone file** (`zones/inojob.com.zone`, `zones/nsl.sh.zone`,
 `scripts/check-zone.sh`). From the Cloudflare export (still to get). The check
@@ -117,7 +132,9 @@ accepting the mesh CA.
   `RouterAPI.ts:276-287`;
 - body `{subdomain, txt}`: `subdomain` must equal the user's `domainName`; `txt` must
   be 43 base64url characters;
-- store in Redis list `acme:txt:<domainName>`, keep the last 2 values, TTL 600 s;
+- store in Redis list `acme:txt:<domainName>`, keep the last 2 values, TTL 600 s,
+  then `DnsZones.sync(label)` (B5) writes the TXT RRset on the primary before
+  answering (expiry is applied by the next full pass);
 - rate limit: 10 updates per user per hour (Redis counter);
 - response as acme-dns: `{"txt": "<value>"}`.
 
@@ -125,23 +142,48 @@ accepting the mesh CA.
 and `/cleanup`, `Authorization: Bearer SERVICE_API_KEY` via
 `authenticateService`, `ExpressAuthenticateMiddleWare.ts:90`). Body `{fqdn, value}`;
 fqdn must be `_acme-challenge.<label>.<zone>.` for a **delegated** label. This is how
-Traefik (lego) obtains `*.<label>.<zone>` for the gateway. Same store as B3.
+Traefik (lego) obtains `*.<label>.<zone>` for the gateway. Same store and same sync
+as B3.
 
-**B5. DNS view for the nameserver** (`GET /dns/v1/zone/:label`, `authenticateService`):
+**B5. Zone reconciler** (new `services/PowerDns.ts` API client, new
+`services/DnsZones.ts`; replaces the 2026-10-22 pull endpoint `/dns/v1/zone/:label`).
 
-```jsonc
-{
-  "label": "wisera", "delegated": true,
-  "answer": "direct",              // direct | gateway (§4.2 of the architecture)
-  "ip": "80.241.218.30",           // when direct
-  "gatewayIps": ["151.115.96.14"], // env DNS_GATEWAY_IPS
-  "hostForce": {"immich": "gateway"},
-  "txt": ["…"],                    // _acme-challenge values
-  "ttl": 30
-}
-```
+- `PowerDns.ts`: thin client over the PowerDNS HTTP API (`GET/POST/DELETE
+  /api/v1/servers/localhost/zones…`, `PATCH` RRsets with `changetype REPLACE|DELETE`),
+  env `PDNS_API_URL`, `PDNS_API_KEY`. Unset = reconciler disabled (all existing
+  deployments).
+- `DnsZones.desired(label)`: from the `dns` block (B1), `dns:state` (B2), route
+  freshness and `acme:txt:*` (B3):
 
-404 for unknown labels (the nameserver answers gateway for those, §4.2).
+  ```jsonc
+  {
+    "zone": "wisera.inojob.com.",
+    "rrsets": [
+      {"name": "wisera.inojob.com.",   "type": "A",   "ttl": 30, "records": ["80.241.218.30"]},
+      {"name": "*.wisera.inojob.com.", "type": "A",   "ttl": 30, "records": ["80.241.218.30"]},
+      {"name": "immich.wisera.inojob.com.", "type": "A", "ttl": 30, "records": ["151.115.96.14"]},
+      {"name": "_acme-challenge.wisera.inojob.com.", "type": "TXT", "ttl": 60, "records": ["\"…\""]}
+    ]
+  }
+  ```
+
+  Gateway answer = env `DNS_GATEWAY_IPS`; NS set = env `DNS_NS_HOSTS`.
+- `DnsZones.sync(label)`: create the zone if missing (kind `Primary`, NS set,
+  `catalog` = the producer zone), diff against `GET` on the zone, `PATCH` only what
+  differs, then **`PUT /zones/<zone>/notify`** (an API write sends no NOTIFY by
+  itself: ~1 s to the secondaries with it, up to 60 s without, measured). `delegated=false` → delete the zone. One log line per change ("wisera:
+  A direct 80.241.218.30 → gateway, reason probe failed") = the shadow log.
+- **Allowlist** (`DnsZones.syncAllow()`): `<key>.allow.<ip-zone>.invalid` A/AAAA for
+  every public agent-route IP (`Routes.ts` `source: "agent"`, filtered with
+  `Probe.ts` `isLanOrReserved`), key = dashed IPv4 or 32-digit expanded IPv6. Added
+  from `POST /routes/:userid/:sig` when the IP is new (then notify); removed by the full
+  pass once unseen for `DNS_ALLOW_GRACE` (env, default 6 h; last-seen per IP in Redis).
+  Applies to every user, delegated or not: it is what `ip.<zone>` answers.
+- Triggers: B2 probe result, B3/B4 TXT, B7/B9 force, B9 delegate; plus a full pass
+  every 60 s over delegated users (drift, route expiry, TXT expiry) and over the
+  primary's zones (delete zones of users no longer delegated).
+- Compatibility: off unless `PDNS_API_URL` is set; without delegated users it writes
+  nothing.
 
 **B6. `/resolve/v2` additive field** (`RouterAPI.ts:481-510`): `dns: {delegated,
 answer, certNotAfter}`. Old gateways and the Worker ignore it; the box self-check
@@ -165,7 +207,11 @@ new endpoint:
 - `dns force <user> [--host <name>] auto|gateway|direct`: `direct` prints a warning
   and asks for `--yes`;
 - `dns acme <user>`: current `acme:txt:*` values and the per-user update count
-  (debugging B3).
+  (debugging B3);
+- `dns sync [<user>|--all]`: run B5 now and print what changed (`--dry-run` prints
+  the diff only);
+- `dns status` also prints the zone's SOA serial on the primary and on each
+  `DNS_NS_HOSTS` entry (a lagging secondary shows up here).
 
 **B8. Reserved labels** (`services/Domain.ts:65`, enforcement in
 `updateUserDomain` :115). Extend `RESERVED_DOMAINS` with `ip`, `ns`, `ns1`…`ns9`,
@@ -174,8 +220,10 @@ new endpoint:
 it in `updateUserDomain`, not only in `/available`. One-off audit: list existing
 `domainName`s that hit the list (expected none).
 
-**Tests** (`src/tests/`, Docker per `backend-dev/test.sh`): `acme-dns.spec.ts`
-(wrong user, wrong subdomain, bad txt, rate limit, expiry), `dns-view.spec.ts`,
+**Tests** (`src/tests/`, Docker per `backend-dev/test.sh`, which gains a
+`pdns-primary` service): `acme-dns.spec.ts` (wrong user, wrong subdomain, bad txt,
+rate limit, expiry), `dns-zones.spec.ts` (desired state per case; against the real
+PowerDNS container: create, idempotent second sync = no PATCH, flip, TXT, delete),
 `reserved.spec.ts`; the probe gets a unit test with a local TLS server and a test CA
 injected.
 
@@ -392,8 +440,8 @@ today). Plus the owner's own toggle *route through the gateway* (B7, `gateway`/`
 
 ```
 G1, B8, W1+M1 ──────────────────────────────► independent, ship any time
-N1 ─► N2 (drop-in for ip.inojob.com, diff-gated)
-B1..B9 (backend release) ─► N1 user zones on ─► D1
+N1 ─► N2 (secondary replaces sslip.io on ns-ip.inojob.com, diff-gated)
+B1..B9 (backend release) + pdns-primary sidecar in the staging backend stack ─► D1
 C1+C3 ─► T1+T2+T3 ─► T4                (template main; no effect until delegated)
 A1                                   (before dot-form SSO apps are tested)
 G2 (Traefik resolver + wisera router)
@@ -429,7 +477,9 @@ place).
 | 4 | Same after cert | resolve to box IP, cert `*.wisera.inojob.com` from Let's Encrypt |
 | 5 | `mesh-cli dns force wisera --host immich gateway` (B9), then the same from the dashboard (B7) | that host → gateway within 30 s; others stay direct |
 | 6 | Stop wisera's agent | routes expire → gateway → offline page |
-| 7 | Stop the backend | nameserver serves cached answers; after 1 h stale, gateway |
+| 7 | Stop the backend, then the primary | secondaries keep answering the last state; after restart the full pass converges with no manual step |
+| 7b | Wipe the primary volume | full pass recreates every delegated zone; secondaries end with identical records |
+| 7c | Edit a record by hand on the primary | next full pass restores it |
 | 8 | Stop the nameserver | dot-form names fail (single staging NS); dash form fine |
 | 9 | SSO app (A1) on dot form | login round trip OK |
 | 10 | A non-delegated staging box | byte-identical Caddy config, no dot-form labels, no ACME orders |
@@ -442,6 +492,13 @@ place).
   planned new VPS): chain to the co-located gateway, or have the tunnel server
   announce a reachable route. Needed before that host serves NAT boxes.
 - **Second staging nameserver**: host to choose (user).
+- ~~`createForward()` parity~~ settled 2026-10-23: built-in rejected, own Lua include
+  579/581 (N1).
+- ~~PowerDNS major version~~ settled 2026-10-23: 5.1 (`pdns-auth-51`), same on
+  primary and secondaries.
+- ~~`ip.<zone>` gated on the allowlist~~ settled 2026-10-23: behaviour change against
+  sslip.io checked, nothing uses ip names for a non-agent IP; grace 6 h, configurable
+  (`DNS_ALLOW_GRACE`).
 
 ## 7. Phase 2 preview (not planned here)
 
@@ -449,4 +506,4 @@ OpenResty edge mode (TLS passthrough including tunnel L4, ACME forwarding,
 termination with DNS-01 certs) replacing Traefik for user names; generated Traefik /
 gateway config per delegated user; HTTP-01 per-name certs and the host list; batch
 delegation; dot form as the primary name (Maison primary domain, platform stacks,
-Dex issuer).
+Dex issuer). DNSSEC after the full zone move (architecture §10.5).

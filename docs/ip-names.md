@@ -5,6 +5,10 @@
 > (nameserver on `yundera-prod`, worker `IP_ZONE=ip.nsl.sh`); rollout record and prod
 > cookbook: [`ip-names-rollout.md`](ip-names-rollout.md). §7 used an interim test
 > nameserver on holyhorse.
+>
+> **Planned change (2026-10-23):** the PowerDNS replacement answers only IPs registered
+> by a real user's agent, not any IP as below; see [`architecture.md`](architecture.md)
+> §3.3 and §10.2.
 
 ## 1. Goal
 
