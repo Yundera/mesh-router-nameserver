@@ -1,0 +1,10 @@
+# Rendered at start by the image (TEMPLATE_FILES=secondary) into pdns.d/secondary.conf.
+secondary=yes
+allow-notify-from={{ PRIMARY_IP }}
+# ip.<zone>: the Lua wildcard and its helpers (ipname4/ipname6)
+enable-lua-records=yes
+lua-global-include-dir=/etc/powerdns/lua-global
+lua-records-exec-limit=20000
+# never accept Lua by API or transfer; this node has no API anyway
+enable-lua-record-updates=no
+loglevel=4

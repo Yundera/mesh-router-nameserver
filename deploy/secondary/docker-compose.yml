@@ -1,0 +1,49 @@
+# Public nameserver: PowerDNS secondary of the backend's hidden primary
+# (../primary/). Serves:
+#   - every zone in the primary's catalog (RFC 9432), received by NOTIFY + AXFR —
+#     today the ip.<zone> allowlist, allow.<ip-zone>.invalid;
+#   - ip.<zone> itself, a LOCAL zone made at start by start.sh: a Lua wildcard
+#     (lua/ipname.lua) that answers an IP-encoded name only for allowlisted IPs.
+# One instance per public host, each with its own .env (see .env.example).
+services:
+  nameserver:
+    image: powerdns/pdns-auth-51:5.1.5@sha256:77ff4efdbb9ec30e9309c8a1cbed6121a67fa3be25c848bbbfa756fc75bf9a27
+    restart: unless-stopped
+    entrypoint: ["/usr/bin/tini", "--", "sh", "/start.sh"]
+    environment:
+      - TEMPLATE_FILES=secondary
+      - IP_ZONE=${IP_ZONE:?set IP_ZONE}
+      - NS_HOSTS=${NS_HOSTS:?set NS_HOSTS}
+      - SOA_RNAME=${SOA_RNAME:?set SOA_RNAME}
+      - CATALOG_ZONE=${CATALOG_ZONE:?set CATALOG_ZONE}
+      - PRIMARY_IP=${PRIMARY_IP:-172.16.53.10}
+      - PRIMARY_PORT=${PRIMARY_PORT:-53}
+    volumes:
+      - nameserver-data:/var/lib/powerdns
+      - ./start.sh:/start.sh:ro
+      - ./secondary.j2:/etc/powerdns/templates.d/secondary.j2:ro
+      - ./lua:/etc/powerdns/lua-global:ro
+    ports:
+      # Bound to the public IP, not 0.0.0.0: systemd-resolved already holds 127.0.0.53/54:53.
+      - "${PUBLIC_IP}:${PUBLIC_PORT:-53}:53/udp"
+      - "${PUBLIC_IP}:${PUBLIC_PORT:-53}:53/tcp"
+    networks:
+      dns-xfr:
+        ipv4_address: ${XFR_IP:-172.16.53.11}
+    cpu_shares: 256
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nameserver-data:
+
+networks:
+  # Co-located with the primary: its stack's network. A remote host instead reaches
+  # the primary's published port; set PRIMARY_IP/PRIMARY_PORT and replace this with a
+  # local network (see docs/architecture.md §10).
+  dns-xfr:
+    external: true

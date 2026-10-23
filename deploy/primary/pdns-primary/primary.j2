@@ -1,0 +1,12 @@
+# Rendered at start by the image (TEMPLATE_FILES=primary) into pdns.d/primary.conf.
+primary=yes
+# zone transfers and NOTIFY only to and from the secondaries (no TSIG: catalog member
+# zones on a consumer get no AXFR-MASTER-TSIG, so required TSIG blocks their transfers)
+allow-axfr-ips={{ DNS_SECONDARY_IPS }}
+also-notify={{ DNS_SECONDARY_IPS }}
+# zones created through the API get this SOA; serial managed per write
+default-soa-content={{ DNS_SOA_NS }}. hostmaster.@ 0 900 900 1209600 30
+default-soa-edit-api=DEFAULT
+# Lua never travels: refused by API and by transfer (secondaries serve their own)
+enable-lua-records=no
+loglevel=4

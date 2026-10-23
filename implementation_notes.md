@@ -65,27 +65,33 @@ code). Image `powerdns/pdns-auth-<major>` pinned by digest, the same on every no
 Settled by test on 2026-10-23 (harness `/d/workspace/tmp-claude/pdns-ipname/`):
 `powerdns/pdns-auth-51` (5.1.5 tested; pin the current 5.1.x by digest at build).
 
-- `deploy/primary/`: compose fragment to merge into the backend stack
-  (`pdns-primary` service, SQLite volume, `api=yes` + `api-key` + `webserver` on the
-  stack network only, `primary=yes`, `allow-axfr-ips` + `also-notify` = the
-  secondaries' IPs, catalog producer zone `catalog.<zone>.invalid` (`pdnsutil zone
-  set-kind … producer`), `default-soa-content=<ns1> hostmaster.@ 0 900 900 1209600 30`,
-  `default-soa-edit-api=DEFAULT`). Port 53 published on a non-standard host port,
-  firewalled to the secondaries. **No TSIG**: catalog member zones on the consumer get
-  no `AXFR-MASTER-TSIG`, so required TSIG blocks their transfers (tested).
-- `deploy/secondary/`: `secondary=yes`, catalog consumer of the primary
-  (`zone create-secondary catalog.<zone>.invalid <primary>` + `set-kind … consumer`),
-  `allow-notify-from` = the primary; `enable-lua-records=yes`,
-  `lua-global-include-dir` → `deploy/secondary/lua/` (**`ipname.lua`, written and
-  tested**, gated on the allowlist zone below), `lua-records-exec-limit=20000`; a
-  start hook that creates `ip.<zone>` as a **native** zone idempotently (SOA/NS +
-  `*.ip.<zone> LUA A ";return ipname4()"` and `AAAA ";return ipname6()"`, TTL 300).
-  `enable-lua-record-updates` stays **off** on every node: Lua never travels by API or
-  transfer.
-- Primary start hook also creates `allow.<ip-zone>.invalid` (kind **primary** —
-  `pdnsutil zone create` makes a native zone, which a catalog ignores — and catalog
-  member); the backend fills it (B5). Env: `ZONE`, `IP_ZONE`, `NS_HOSTS`, `SOA_RNAME`,
-  `PRIMARY_ADDR`, `PUBLIC_IP`.
+**Built 2026-10-23**, tested on staging the same day:
+
+- `deploy/primary/`: `docker-compose.yml` fragment to merge into the backend stack
+  (`pdns-primary` service, SQLite volume, API only on the stack network `pdns-api`,
+  `dns-xfr` network with fixed addresses shared with a co-located secondary) and
+  `pdns-primary/primary.j2` (rendered by the image's `TEMPLATE_FILES`):
+  `primary=yes`, `allow-axfr-ips` + `also-notify` = `DNS_SECONDARY_IPS`,
+  `default-soa-content=<DNS_SOA_NS> hostmaster.@ 0 900 900 1209600 30`,
+  `default-soa-edit-api=DEFAULT`, Lua off. **No start hook**: the backend creates the
+  catalog (kind `Producer`, `catalog.<SERVER_DOMAIN>.invalid` or `DNS_CATALOG_ZONE`)
+  and the allow zone (kind `Primary`, catalog member) through the API when missing, so
+  a lost volume is rebuilt by the next pass. A remote secondary needs the primary's
+  port 53 published, firewalled to it. **No TSIG**: catalog member zones on the
+  consumer get no `AXFR-MASTER-TSIG`, so required TSIG blocks their transfers (tested).
+- `deploy/secondary/`: `docker-compose.yml`, `secondary.j2` (`secondary=yes`,
+  `allow-notify-from` = the primary, `enable-lua-records`, `lua-global-include-dir`,
+  `lua-records-exec-limit=20000`, `enable-lua-record-updates=no`), `lua/ipname.lua`
+  (gated on the allowlist zone), `start.sh`: creates the catalog consumer once
+  (`zone create-secondary` + `set-kind consumer`) and rebuilds `ip.<zone>` as a
+  **native** zone from env on every start (SOA/NS + `*.ip.<zone> LUA A ";return
+  ipname4()"` and `AAAA ";return ipname6()"`, TTL 300). Env in `.env.example`:
+  `PUBLIC_IP`, `PUBLIC_PORT` (side-by-side test), `IP_ZONE`, `NS_HOSTS`, `SOA_RNAME`,
+  `CATALOG_ZONE`, `PRIMARY_IP`. `pdnsutil zone list-all` prints names without the
+  trailing dot (a mismatch there crash-looped the hook: tested).
+- Measured end to end (local, then staging): a new agent IP answers on the secondary
+  ~1–3 s after its registration; a pruned IP is gone in ~2.5 s; only the **first**
+  creation of the allow zone waits for the primary's catalog cycle (≤ 60 s).
 - **Gate for the swap:** `test/ipname/` (corpus + `diff.sh`, README with the run
   commands): 579/581 identical to the sslip.io server, the 2 differences expected.
   Rerun against the real deploy before switching `ns-ip.inojob.com`.
@@ -94,7 +100,7 @@ Settled by test on 2026-10-23 (harness `/d/workspace/tmp-claude/pdns-ipname/`):
 
 **N2. Deploy** (`deploy/docker-compose.yml` → `deploy/secondary/docker-compose.yml`).
 The public NS hosts switch from `cunnie/sslip.io-dns-server@sha256:…` to the N1
-secondary. Keep the `${PUBLIC_IP}:53` binding (systemd-resolved holds
+secondary (the sslip.io files in `deploy/` stay until prod has switched too). Keep the `${PUBLIC_IP}:53` binding (systemd-resolved holds
 127.0.0.53). On nasselle, the secondary reaches the primary over the backend stack
 network; on any other host, over the published primary port.
 
@@ -177,8 +183,17 @@ as B3.
   every public agent-route IP (`Routes.ts` `source: "agent"`, filtered with
   `Probe.ts` `isLanOrReserved`), key = dashed IPv4 or 32-digit expanded IPv6. Added
   from `POST /routes/:userid/:sig` when the IP is new (then notify); removed by the full
-  pass once unseen for `DNS_ALLOW_GRACE` (env, default 6 h; last-seen per IP in Redis).
+  pass once unseen for `DNS_ALLOW_GRACE_SECONDS` (env, default 6 h; last-seen per IP in Redis).
   Applies to every user, delegated or not: it is what `ip.<zone>` answers.
+  **Built 2026-10-23** (`services/PowerDns.ts`, `services/DnsZones.ts`: Redis sorted
+  set `dns:allow`, `noteRoutes()` after a registration, `syncAllow()` serialized, full
+  pass every 60 s; env `PDNS_API_URL`, `PDNS_API_KEY`, `DNS_IP_ZONE`,
+  `DNS_ALLOW_GRACE_SECONDS`, `DNS_CATALOG_ZONE`; both API values unset = off;
+  `mesh-cli dns allow|sync [--dry-run]`; `src/tests/dns-zones.spec.ts`).
+  **Route validation** (`RouteValidator.ts`): a domain route inside `DNS_IP_ZONE`
+  is checked by connecting to `route.ip` with the name kept for SNI/Host, not by
+  resolving it. Resolving would deadlock: the zone answers an IP only after its first
+  accepted registration.
 - Triggers: B2 probe result, B3/B4 TXT, B7/B9 force, B9 delegate; plus a full pass
   every 60 s over delegated users (drift, route expiry, TXT expiry) and over the
   primary's zones (delete zones of users no longer delegated).
@@ -498,7 +513,7 @@ place).
   primary and secondaries.
 - ~~`ip.<zone>` gated on the allowlist~~ settled 2026-10-23: behaviour change against
   sslip.io checked, nothing uses ip names for a non-agent IP; grace 6 h, configurable
-  (`DNS_ALLOW_GRACE`).
+  (`DNS_ALLOW_GRACE_SECONDS`).
 
 ## 7. Phase 2 preview (not planned here)
 

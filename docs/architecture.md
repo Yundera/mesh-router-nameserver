@@ -504,7 +504,7 @@ The dynamic part of the design is a backend service, not a DNS server feature:
   membership); the secondaries follow.
 - **The `ip.<zone>` allowlist**: the public IPs of agent routes (`source: agent`,
   signature-verified, `isLanOrReserved` filtered) of every registered user, kept for a
-  grace period after the last registration (`DNS_ALLOW_GRACE`, default 6 h: short
+  grace period after the last registration (`DNS_ALLOW_GRACE_SECONDS`, default 6 h: short
   outages and backend restarts don't break names, little churn). Written on registration (new IP → allowed
   within seconds) and pruned by the full pass. The whole allowlist zone is transferred
   on each change; at a few thousand boxes, shard it (one zone per first octet).
