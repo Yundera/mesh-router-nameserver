@@ -7,7 +7,7 @@
 > answer identical (577 same; the 4 differences are the 2 below plus the test
 > server's own NS/SOA names). Harness: `/d/workspace/tmp-claude/pdns-ipname/`.
 
-Compares the PowerDNS LUA wildcard (`deploy/secondary/lua/ipname.lua`) with the
+Compares the PowerDNS LUA wildcard (`image/lua/ipname.lua`) with the
 sslip.io server that serves `ip.<zone>` today, answer for answer, over `corpus.txt`
 (45 hand-picked names + 536 generated ones; zone `ip.test`).
 
@@ -23,7 +23,7 @@ docker run -d --name sslip-t --network pdnstest cunnie/sslip.io-dns-server@sha25
   -ns .=ns1-ip.test. -soa ns1-ip.test.,dns.test.,1,900,900,604800,60 -a ns1-ip.test=10.9.9.9
 printf 'enable-lua-records=yes\nlua-global-include-dir=/etc/powerdns/lua-global\nlua-records-exec-limit=20000\n' > lua.conf
 docker run -d --name pdns-t --network pdnstest -v "$PWD/lua.conf:/etc/powerdns/pdns.d/lua.conf:ro" \
-  -v "$PWD/../../deploy/secondary/lua:/etc/powerdns/lua-global:ro" powerdns/pdns-auth-51:5.1.5
+  -v "$PWD/../../image/lua:/etc/powerdns/lua-global:ro" powerdns/pdns-auth-51:5.1.5
 docker exec pdns-t sh -c 'pdnsutil zone create ip.test ns1-ip.test &&
   pdnsutil rrset add ip.test "*.ip.test" LUA "A \";return ipname4()\"" &&
   pdnsutil rrset add ip.test "*.ip.test" LUA "AAAA \";return ipname6()\"" && pdns_control rediscover'

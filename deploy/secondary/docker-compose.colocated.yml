@@ -1,0 +1,14 @@
+# Secondary on the primary's own host: reach it over the backend stack's dns-xfr
+# network instead of a published port. Enable in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.colocated.yml
+#   PRIMARY_IP=172.16.53.10
+services:
+  nameserver:
+    networks:
+      dns-xfr:
+        # must be in the primary's DNS_SECONDARY_IPS
+        ipv4_address: ${XFR_IP:-172.16.53.11}
+
+networks:
+  dns-xfr:
+    external: true

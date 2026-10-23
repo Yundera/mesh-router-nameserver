@@ -17,7 +17,7 @@ These facts shape the plan more than the design does:
 
 | Fact | Where | Consequence |
 |---|---|---|
-| The agent registers **only domain routes**: nip.io (priority 1) and, with `IP_ZONE`, `<ip>.ip.<zone>` (priority 2). No raw `ip` route, no sslip.io route. The ip/sslip/nip table in `CLAUDE.md`, `doc/DATA_FLOW.md`, `doc/architecture/README.md` is stale. | `mesh-router-agent/src/services/IpRegistrar.ts:286-304` | The public IP is the `ip` field of the agent's routes. Removing nip.io means replacing those routes, not deleting them. |
+| The agent registers **only domain routes**: nip.io (priority 1) and, with `IP_ZONE`, `<ip>.ip.<zone>` (priority 2). No raw `ip` route, no sslip.io route. **Since agent 1.1.3 (M1, 2026-10-23):** with `IP_ZONE`, only the `<ip>.ip.<zone>` pair at priority 1; nip.io only without `IP_ZONE`. The route tables in `CLAUDE.md`, `doc/architecture/README.md` and the READMEs were updated the same day; `doc/DATA_FLOW.md` carries a note. | `mesh-router-agent/src/services/IpRegistrar.ts:286-304` | The public IP is the `ip` field of the agent's routes. Removing nip.io means replacing those routes, not deleting them. |
 | Box Caddy has **no on-demand TLS and no `ask` endpoint**. Sites without a `tls` line use the default issuer chain `acme` then `internal`; `gateway_tls` sites use the mesh cert loaded as `cert0` through the admin API. | `mesh-router-template-root/Caddyfile:36,52-55,61-69`; `mesh-router-caddy/entrypoint.sh:38-50,99-117` | Any label host without `import gateway_tls` makes Caddy start ACME for it. See the next row. |
 | `immich.john.nsl.sh` **already resolves to Cloudflare** for every user: a DNS wildcard matches any depth, and the Worker parses dot form (`resolver.lua:93`, worker `parseHost`). Cloudflare presents a cert that doesn't cover two levels. | public DNS | If a non-delegated box rendered a dot-form host with no TLS line, Caddy would order a cert per app via HTTP-01 through the Worker, and the fleet would burn `nsl.sh`'s shared bucket (50/week, no PSL yet). **Dot form is rendered only on delegated boxes, and only once their wildcard exists.** |
 | Tunnel routes point at the tunnel server's private Docker address (`172.30.0.3:80` on staging, checked live), reachable only from containers on that host's `mesh-internal` network. The tunnel server forwards **HTTP** by `Host`, not raw TLS. | `mesh-router-tunnel/src/requester/RouteRegistrar.ts:79-96`, `nginx/provider/*` | A gateway must sit next to the tunnel server to reach NAT boxes. TLS passthrough to a tunnel box needs tunnel work: Phase 2. |
@@ -97,6 +97,13 @@ Settled by test on 2026-10-23 (harness `/d/workspace/tmp-claude/pdns-ipname/`):
   Rerun against the real deploy before switching `ns-ip.inojob.com`.
 - No shadow log or backend client here any more: the shadow log moves to the
   backend reconciler (B5), metrics come from PowerDNS's own `/metrics` webserver.
+
+- **Image since 2026-10-23** (after the staging test): the config above is baked into
+  `ghcr.io/yundera/mesh-router-nameserver` (`Dockerfile`, `image/`), one image for both
+  roles (`ROLE=primary|secondary`); `start.sh` became `image/entrypoint.sh`, the `.j2`
+  files `image/templates/`, the Lua `image/lua/`. `deploy/` keeps only compose + env.
+  The secondary compose reaches the primary over the internet by default;
+  `docker-compose.colocated.yml` puts it on `dns-xfr` instead. CI: `test/smoke/`.
 
 **N2. Deploy** (`deploy/docker-compose.yml` → `deploy/secondary/docker-compose.yml`).
 The public NS hosts switch from `cunnie/sslip.io-dns-server@sha256:…` to the N1
@@ -359,18 +366,32 @@ New volume in `docker-compose.yml:113-116`: `${DATA_ROOT}/AppData/mesh/data/dns:
 - `routing_host_suffixes` (:269-280): unchanged (it feeds the dash-form redirect
   check; see A1).
 
-**T5. nip.io removal on the box side** (after W1 is live everywhere):
+**T5. nip.io removal on the box side** (after W1 is live everywhere). **Revised
+2026-10-23** (M1 kept nip.io for boxes without `IP_ZONE`; audit of every nip.io
+reference): no fleet prerequisite beyond the Worker with W1 and the backend's
+`CERT_EXTRA_SANS=*.<IP_ZONE>`, both already needed by M1. The rest rides in one
+mesh-template update, which also carries the agent 1.1.3 pin.
 
-- `common.sh:243-253`: drop the `nip|…` line;
-- platform labels: drop the `caddy_1 … nip.io` groups (files in §0) and in
-  template-root `root/docker-compose.yml:130-141`, `root/template/stacks/kopia/docker-compose.yml:154-162`;
-- `REDIRECT_HOST_SUFFIXES` fallbacks drop `${PUBLIC_IP_DASH}.nip.io`
-  (`stacks/auth/docker-compose.yml:264,347`, `stacks/maison/docker-compose.yml:85`,
-  `docker-compose.yml:206`; template-root literals `root/docker-compose.yml:42`,
-  `stacks/kopia/docker-compose.yml:126`);
-- Caddyfile `{$PUBLIC_IP_DASH}.nip.io` block (:47 in the image Caddyfile and its
-  template copy);
-- `README.md:295-317` `.env` table.
+- `common.sh` `routing_domains`: emit the `nip|…` line **only when `IP_ZONE` is
+  empty** (FOSS boxes still register nip.io routes). It feeds Maison's routing setting,
+  `REDIRECT_HOST_SUFFIXES` and `ROUTING_DOMAINS`. Template-root's admin and kopia
+  labels follow `ROUTING_DOMAINS` (`scripts/library/stacks.sh:84-140`), and the
+  platform labels and redirect fallbacks are already rendered from it (mesh template
+  06fc137, e0343e3), so the file list above for those is obsolete;
+- Caddyfile root `{$PUBLIC_IP_DASH}.nip.io` block: static, so it can't follow
+  `IP_ZONE`; keep it (FOSS needs it, harmless elsewhere);
+- `scripts/tools/migrate.sh:594-596` `step_verify_target` curls
+  `mesh-console-<ip>.nip.io/api/health` on the target: switch to a name every
+  template version serves (`mesh-console-<ip>.sslip.io`), in the same update;
+- expect one fleet-wide Maison republish (the routing value changes), like the ip
+  zone's addition;
+- a removed name doesn't go dark: it still resolves to the box and lands on Caddy's
+  catch-all (cert0, `DEFAULT_SERVICE` = Maison);
+- follow-ups that can ship later: orchestrator `list-health-check.ts` HEADs
+  `<ip>.nip.io` (turns into a false "ok" via the catch-all; retarget to the ip zone),
+  mesh-console Domain/Certificates pages show the nip.io name, settings-center
+  strings, demo's own `demo-auth-<ip>.nip.io` label;
+- `README.md` `.env` table.
 
 ### A — mesh-router-auth (registrar)
 
@@ -387,11 +408,12 @@ on the dash host and the user stays there. Session cookies are host-only
 
 ### M — mesh-router-agent
 
-**M1. sslip.io routes replace nip.io** (`src/services/IpRegistrar.ts:286-304`):
-register `buildDomainRoute(…, 'sslip.io')` where it registers nip.io today; keep the
-`IP_ZONE` pair. The Worker needs domain-type routes (`index.ts:391-412`), so a box
-without `IP_ZONE` (FOSS) still has one. Ship with W1. Template pin bump in
-`docker-compose.yml:60`.
+**M1. ip.<zone> routes replace nip.io** (`src/services/IpRegistrar.ts:286-304`;
+**done 2026-10-23, agent 1.1.3**, revised by the user's decision: sslip.io stays out
+of the routes, ip.<zone> is what replaces nip.io). With `IP_ZONE`: only the
+`<ip>.<IP_ZONE>` pair, at the agent's priority. Without (FOSS): the nip.io pair,
+unchanged. Route validation now depends on our nameserver (second-nameserver open
+point). Template pin bumped in `docker-compose.yml:60`.
 
 ### W — mesh-router-gateway-cf
 

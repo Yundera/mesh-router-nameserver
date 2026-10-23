@@ -77,13 +77,41 @@ elsewhere in `mesh-router-root` — all detailed in
 ```
 mesh-router-nameserver/
 ├── README.md               ← you are here
+├── Dockerfile              ← image: stock PowerDNS + the config below, ROLE=primary|secondary
+├── image/
+│   ├── entrypoint.sh       ← checks env per role, builds the secondary's local zones, starts pdns
+│   ├── templates/          ← primary.j2, secondary.j2 (rendered by the stock startup)
+│   └── lua/ipname.lua      ← gated ip.<zone> wildcard (sslip.io rule + allowlist lookup)
+├── deploy/
+│   ├── primary/            ← pdns-primary sidecar for the backend stack (compose fragment)
+│   ├── secondary/          ← public nameserver: compose, colocated override, .env.example
+│   └── *.yml, .env.example ← legacy ip.<zone> nameserver (sslip.io server), until prod switches
+├── test/
+│   ├── smoke/              ← CI: primary + secondary + gated answers + NOTIFY (`sh test/smoke/run.sh`)
+│   └── ipname/             ← parity of ipname.lua with the sslip.io server
 ├── docs/
 │   ├── architecture.md     ← resolution flow, eligibility, cert bootstrap, fallback tiers
 │   ├── ip-names.md         ← stateless nip.io-style names (<app>-<ip>.ip.nsl.sh), CF test
 │   └── ip-names-rollout.md ← staging record + prod cookbook for the ip.<zone> nameserver
-├── deploy/                 ← compose for the ip.<zone> nameserver (sslip.io server), .env.example, peer file
 └── implementation_notes.md ← build plan, file-by-file mapping, rollout order, open questions
 ```
+
+## Image
+
+`ghcr.io/yundera/mesh-router-nameserver`, published by `.github/workflows/docker.yml`:
+`:main` on every push to `main`, `X.Y.Z` + `X.Y` on a `vX.Y.Z` tag, after the smoke
+test passes. It is `powerdns/pdns-auth-51` (pinned by digest) with this repo's config
+baked in, so a host carries only `docker-compose.yml` + `.env`: no scripts, no
+templates, no Lua.
+
+| `ROLE` | Required env | Optional |
+|---|---|---|
+| `primary` | `PDNS_AUTH_API_KEY`, `DNS_SOA_NS`, `DNS_SECONDARY_IPS` | — |
+| `secondary` | `IP_ZONE`, `NS_HOSTS`, `SOA_RNAME`, `CATALOG_ZONE`, `PRIMARY_IP` | `PRIMARY_PORT` (53) |
+
+A missing variable stops the container with its name. `TEMPLATE_FILES` still works
+for an extra template mounted into `/etc/powerdns/templates.d/` (rendered after the
+role's own).
 
 ## Quick links
 

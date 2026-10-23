@@ -1,0 +1,41 @@
+# Smoke test for the image: a primary, a secondary and a client on one network.
+# Driven by run.sh; nothing is published on the host.
+name: nameserver-smoke
+
+services:
+  primary:
+    build: ../..
+    image: mesh-router-nameserver:smoke
+    environment:
+      - ROLE=primary
+      - PDNS_AUTH_API_KEY=smoke
+      - DNS_SOA_NS=ns1.smoke.test
+      - DNS_SECONDARY_IPS=172.16.54.11
+    networks:
+      smoke:
+        ipv4_address: 172.16.54.10
+
+  secondary:
+    image: mesh-router-nameserver:smoke
+    environment:
+      - ROLE=secondary
+      - IP_ZONE=ip.smoke.test
+      - NS_HOSTS=ns1.smoke.test,ns2.smoke.test
+      - SOA_RNAME=dns.smoke.test
+      - CATALOG_ZONE=catalog.smoke.test.invalid
+      - PRIMARY_IP=172.16.54.10
+    networks:
+      smoke:
+        ipv4_address: 172.16.54.11
+
+  client:
+    image: alpine:3.20
+    command: ["sleep", "infinity"]
+    networks:
+      - smoke
+
+networks:
+  smoke:
+    ipam:
+      config:
+        - subnet: 172.16.54.0/24

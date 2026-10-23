@@ -1,4 +1,5 @@
-# PowerDNS hidden primary — a sidecar to merge into the mesh-router-backend stack.
+# PowerDNS hidden primary (image ghcr.io/yundera/mesh-router-nameserver, ROLE=primary) —
+# a sidecar to merge into the mesh-router-backend stack.
 # The backend is its only writer (HTTP API, DnsZones.ts); the public nameservers
 # (../secondary/) are its only readers (NOTIFY + AXFR). Nothing here is published to
 # the internet and nothing here needs a backup: a fresh volume is rebuilt by the
@@ -17,23 +18,23 @@
 # port below, firewalled to it).
 services:
   pdns-primary:
-    image: powerdns/pdns-auth-51:5.1.5@sha256:77ff4efdbb9ec30e9309c8a1cbed6121a67fa3be25c848bbbfa756fc75bf9a27
+    image: ghcr.io/yundera/mesh-router-nameserver:1.3.0
     restart: unless-stopped
     environment:
+      - ROLE=primary
       - PDNS_AUTH_API_KEY=${PDNS_API_KEY:?set PDNS_API_KEY}
-      - TEMPLATE_FILES=primary
       - DNS_SOA_NS=${DNS_SOA_NS:?set DNS_SOA_NS}
       - DNS_SECONDARY_IPS=${DNS_SECONDARY_IPS:-172.16.53.11}
     volumes:
       - pdns-primary-data:/var/lib/powerdns
-      - ./pdns-primary/primary.j2:/etc/powerdns/templates.d/primary.j2:ro
     networks:
       # the backend reaches the API here: put mesh-router-backend on this network too
       pdns-api: {}
       dns-xfr:
         ipv4_address: ${DNS_PRIMARY_IP:-172.16.53.10}
-    # ports:
-    #   - "<host-ip>:5353:53/tcp"   # remote secondaries only (AXFR is TCP; NOTIFY goes out)
+    # ports:   # remote secondaries only: AXFR over TCP, SOA checks over UDP; NOTIFY goes out
+    #   - "<host-ip>:5300:53/tcp"
+    #   - "<host-ip>:5300:53/udp"
     cpu_shares: 256
     mem_limit: 256m
     logging:

@@ -469,7 +469,7 @@ A delegated user's zone holds a handful of records, all written by the backend:
 `ip.<zone>` is the one zone that can't be transferred: its names are unbounded. Each
 public node serves it from config, with no data to sync: a wildcard `LUA` record
 (`*.ip.<zone> LUA A ";return ipname4()"`, `AAAA ";return ipname6()"`) calling a Lua
-include shipped with the image (`deploy/secondary/lua/ipname.lua`). It follows
+include shipped with the image (`image/lua/ipname.lua`). It follows
 sslip.io's rule: four octets joined by `-` (leftmost), else by `.` (leftmost), else one
 8-digit hex label; IPv6 in dashed form inside one label; no IP → empty answer.
 The parsed IP is then looked up (`dblookup`) in the allowlist zone: one plain
