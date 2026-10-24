@@ -9,7 +9,7 @@
 # = its published port). On the primary's own host add docker-compose.colocated.yml.
 services:
   nameserver:
-    image: ghcr.io/yundera/mesh-router-nameserver:1.3.0
+    image: ghcr.io/yundera/mesh-router-nameserver:1.3.1
     restart: unless-stopped
     environment:
       - ROLE=secondary

@@ -1,3 +1,61 @@
+# Status — DNS delegation track (2026-10-24)
+
+Plan and results: [`implementation_notes.md`](implementation_notes.md) ("Built", §5
+results). **wisera.inojob.com is delegated** to nss1/nss2 (Cloudflare NS records,
+TTL 300) and answers its own IP with its own Let's Encrypt certificates.
+
+## Released (pushed)
+
+| Repo | Release | What |
+|---|---|---|
+| mesh-router-backend | v2.0.29, v2.0.30, v2.0.31 | per-user zones + probe; acme-dns API + httpreq + owner toggle; gateway certificates (`GatewayCerts.ts`), `live` |
+| mesh-router-gateway | v1.3.0 | TLS listener, certificate per SNI from the backend |
+| mesh-router-caddy | v1.3.0, v1.3.1, v1.3.2 | acmedns module (pinned xcaddy), `tls_passthrough`, `tls_automate` |
+| mesh-router-auth | v1.1.9 | `REDIRECT_DOT_SUFFIXES` |
+| mesh-router-gateway-cf | v1.1.6 | owner force from the `dns` block; **staging deployed 2026-10-24** (version `1575954c`, rollback `56dbe7c0`): forced dash name traces `cf-worker,owner-force,gateway,agent,pcs` within the 60 s resolve cache |
+| mesh-console | v1.7.0 | Nameserver card + "Route through the gateway" |
+| mesh-dashboard | v2.3.4 | Nameserver column |
+| mesh-router-template-root | `294cbaa`, `2589e87` (main) | DNS-01 wildcard for a delegated box, dot form, `set-dns-force.sh`; pins caddy 1.3.2, mesh-auth 1.1.9, mesh-console 1.7.0 |
+| mesh-router-nameserver | v1.3.0 tag, v1.3.1 | v1.3.0 has **no CI image** (its push event was dropped; re-pushing an unchanged tag sends none). v1.3.1 = v1.3.0 + docs + `workflow_dispatch`; staging moves to `:1.3.1` once published |
+
+Backend **v2.0.32**: catalog serial bumped on zone deletion, serial catch-up above the
+secondaries, empty `hostForce` removed.
+
+## Where staging is
+
+- Backend `mesh-router-backend:2.0.32-serial-local` (= v2.0.32; switch to the published
+  image), `DNS_SHADOW_ZONES=0` (delegated users only = wisera;
+  the other shadow zones were removed), `GATEWAY_ACME_DIRECTORY` = Let's Encrypt.
+  Compose backups `…/backend/docker-compose.yml.bak-2026-10-24-*`.
+- Gateway `ghcr.io/yundera/mesh-router-gateway:1.3.0` + TCP passthrough labels
+  (`HostSNIRegexp(^.+\.inojob\.com$)`, port 8443, PROXY v2). Backup `.bak-2026-10-24-tls`.
+- Primary + nss2 `:a45078f`; nss1 (51.15.79.231) `:a45078f`.
+- wisera on template `main` (published images), `DNS_DOT_FORM=1`, `REDIRECT_DOT_SUFFIXES=wisera.inojob.com`.
+- Worker v1.1.6 (W2) deployed on staging; prod Worker untouched.
+
+## Open
+
+- Checklist #12 (real ip.<zone> outage: needs both NS down) and a full SSO login on
+  a dot-form name (#9).
+- Rotate the staging SendGrid key (printed in a session log on 2026-10-24).
+- Let's Encrypt pacing for batch delegation (implementation_notes §6) until the PSL entry.
+- Out of scope for now: IPv6 (dot names have no AAAA), second gateway host and tunnel
+  reachability, prod rollout.
+
+## Gotchas met (2026-10-24)
+
+- PowerDNS does not bump a producer catalog's serial when a member zone is deleted:
+  the secondaries keep serving it. A recreated zone starts at `YYYYMMDD01`, possibly
+  below the secondaries' copy, which then ignore every change. Both handled by the
+  backend now.
+- Caddy automatic HTTPS skips a name a loaded certificate covers: cert0 (`*.<zone>`)
+  covers the box root → `tls_automate`. `local/` in Caddy's storage = internal CA.
+- `DNS_DOT_FORM` flip → one Maison republish (apps recreated, ~1 min of 502).
+- lego httpreq sends only Basic auth.
+- Pushing more than three tags at once: GitHub creates no tag events, so no CI image.
+
+---
+
 # Status — Phase 1 independent items (2026-10-23, end of day)
 
 Plan: [`implementation_notes.md`](implementation_notes.md) §2–§3. This file covers the

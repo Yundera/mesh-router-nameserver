@@ -11,6 +11,27 @@
 > Phase 0 (P0.1–P0.4) was marked implemented on 2026-06-14 but is not what the code
 > holds today; this file starts from the code.
 
+> **Built 2026-10-24** (staging, wisera delegated): see "Built" below; §1 and G2 were
+> revised the same day (the gateway terminates TLS itself, no per-user Traefik config).
+
+## Built (2026-10-24)
+
+| Item | Repo | Release | Notes |
+|---|---|---|---|
+| N1/N2 | mesh-router-nameserver | v1.3.0 (`a45078f`, no CI image) → v1.3.1 | hidden primary in the backend stack, nss1 51.15.79.231 + nss2 nasselle |
+| B1, B2, B5, B6, B9 | mesh-router-backend | v2.0.29 | `dns` block on the user doc; TLS probe (`DnsProbe.ts`); per-user zones (`DnsZones.ts`), shadow mode `DNS_SHADOW_ZONES`; `/resolve/v2` `dns`; `mesh-cli dns status\|delegate\|force\|probe\|sync\|allow` |
+| B3, B4, B7 | mesh-router-backend | v2.0.30 | `POST /acme-dns/update` (box signature), lego httpreq `/acme-dns/present\|cleanup`, `PUT /dns/v1/force/:userid`; `mesh-cli dns acme` |
+| G2 (revised) | mesh-router-backend | v2.0.31 | `GatewayCerts.ts`: the backend orders `<user>.<zone>` + `*.<user>.<zone>` by DNS-01 on its own zone for **live** delegated users (`GATEWAY_ACME_DIRECTORY`), served on `GET /gateway/cert/:label`; `live` = public resolvers return our NS; owner toggle by box signature `PUT /dns/v1/force/:userid/:sig`; `force`/`hostForce`/`live` in the `dns` block; httpreq accepts Basic auth (lego sends nothing else) |
+| — | mesh-router-backend | v2.0.32 | catalog serial bumped when a member zone is deleted (PowerDNS does not, secondaries kept serving it); zone serials lifted above the secondaries' (recreated primary); empty `hostForce` removed |
+| G2 (revised) | mesh-router-gateway | v1.3.0 | TLS listener `GATEWAY_TLS_PORT` (8443, PROXY protocol behind a passthrough; 443 on a direct host), certificate per SNI from the backend (`nginx/lua/certs.lua`), self-signed fallback |
+| C1 | mesh-router-caddy | v1.3.0 | pinned xcaddy build: Caddy 2.11.4, docker-proxy v2.13.1, caddy-dns/acmedns v0.7.0; `test/dns01/run.sh` (Pebble) |
+| C3 | mesh-router-caddy | v1.3.1, v1.3.2 | `/data/dns/tls_passthrough` (own certs instead of cert0); `/data/dns/tls_automate` → `apps.tls.certificates.automate` (v1.3.2, see C3) |
+| T1–T4 | mesh-router-template-root | `294cbaa`, `2589e87` | Caddyfile hooks, `ensure-dns-delegation.sh`, dot form for store apps only, `tools/set-dns-force.sh`; pins caddy 1.3.2, mesh-auth 1.1.9, mesh-console 1.7.0 |
+| A1 | mesh-router-auth | v1.1.9 | `REDIRECT_DOT_SUFFIXES` → `<app>.<suffix>` callbacks after the dash ones |
+| W2 | mesh-router-gateway-cf | v1.1.6 | `dns.force`/`hostForce` = `X-Mesh-Force: gateway` (header still wins); staging deployed 2026-10-24, effective within the 60 s resolve cache |
+| B7 UI | mesh-console | v1.7.0 | Diagnostics › Nameserver: answer + "Route through the gateway" (host verb `tools/set-dns-force.sh`; the console never holds the signature) |
+| D1 | mesh-dashboard | v2.3.4 | Nameserver column on the Domains page (read-only) |
+
 ## 0. What the code says (and older docs get wrong)
 
 These facts shape the plan more than the design does:
@@ -39,11 +60,15 @@ These facts shape the plan more than the design does:
 - **The box learns it is delegated from the backend**, not from a new contract key:
   `/resolve/v2` gains a `dns` block, and the self-check reads it. Works the same for
   Yundera and FOSS boxes.
-- **Gateway = existing Traefik + OpenResty, unchanged code.** Traefik gets a DNS-01
-  cert resolver against our backend and a router for delegated names; OpenResty
-  already parses dot form. The OpenResty edge mode (SNI passthrough, ACME
-  forwarding) moves to Phase 2: passthrough needs tunnel work (§0) and ACME
-  forwarding only serves HTTP-01, which Phase 1 doesn't use.
+- **Gateway = OpenResty terminating TLS itself, nothing per user in Traefik**
+  (revised 2026-10-24, user decision: no custom or per-user config in that part of
+  the architecture). The gateway gets a TLS listener that picks the certificate per
+  SNI; the backend issues the delegated users' certificates (DNS-01 on its own zone)
+  and every gateway fetches them, so a second gateway (direct host, `:443`) needs
+  nothing more. On nasselle, where Traefik owns 443 for other sites, one generic TCP
+  passthrough label on the gateway container hands it `*.<zone>` (G2). OpenResty
+  already parses dot form. ACME forwarding and passthrough to tunnel boxes stay
+  Phase 2.
 - **Stock PowerDNS, no DNS code of ours** (revised 2026-10-23; replaces the Go
   `miekg/dns` service). The backend is the only writer, through the API of a hidden
   primary that ships as a sidecar of the backend stack; the public nameservers are
@@ -299,6 +324,15 @@ Caddyfile, a labelled test app and `tls internal` standing in for the DNS-01 iss
   (`mesh-router-gateway/entrypoint.sh:43`, `gateway.conf:79-80`), so the box serving
   the LE wildcard to the gateway is fine.
 
+**C3. Built 2026-10-24 (caddy v1.3.1 + v1.3.2).** Two findings on wisera: (1) the
+gateway CA cert0 is `*.<zone>`, which covers the box root `<user>.<zone>`, so Caddy's
+automatic HTTPS skips the root ("matching certificates are already loaded") even with
+a `tls { dns … }` block; `auto_https ignore_loaded_certs` would start ACME for every
+dash-name app, so the entrypoint injects the names of `/data/dns/tls_automate` into
+`apps.tls.certificates.automate` instead (same re-inject loop as the catch-all);
+(2) Caddy's `local/` storage holds internal-CA certs for the root: only ACME issuer
+directories count as "the box has its certificate". Original plan:
+
 **C3. Zone passthrough policy** (`entrypoint.sh`, catch-all jq at :99-107). Read
 `/data/dns/tls_passthrough` (one SNI pattern per line, absent = none) on every loop
 iteration and insert one `{"match":{"sni":[…]}}` policy right before the cert0
@@ -441,6 +475,18 @@ nip.io expectations to sslip.io; add W2 cases. `pnpm test`.
 - `doc/architecture/SERVER_DEPLOYMENT.md:81-95`: tunnel route is the tunnel server's
   address (`172.30.0.3` on staging), not the gateway's.
 
+**G2. Revised and built 2026-10-24** (backend v2.0.31, gateway v1.3.0). No resolver
+and no per-user router in Traefik: the backend issues the gateway certificates
+(`GatewayCerts.ts`, acme-client, DNS-01 through its own zone, only once the
+delegation is live so no failed validation burns the rate limit), the gateway serves
+them per SNI (`GET /gateway/cert/:label`, cached 10 min per worker), everything else
+gets a self-signed fallback (Cloudflare is on SSL "Full": unchanged for dash names).
+On nasselle, the gateway compose carries one generic TCP router:
+`HostSNIRegexp(^.+\.inojob\.com$)`, `tls.passthrough`, port 8443, `proxyProtocol`
+v2 (`GATEWAY_TLS_PROXY_PROTOCOL=1` for the client address); the apex `inojob.com`
+keeps its own HTTP routers (TCP routers win over HTTP ones, so the rule must not
+cover them). The original plan, kept for reference:
+
 **G2. Traefik on the gateway host (staging nasselle, config only):**
 
 - `traefik.yml`: a `certificatesResolvers.meshdns` with `acme.dnsChallenge.provider:
@@ -527,12 +573,40 @@ place).
 | 11 | acme-dns with another user's credential | 401/403, nothing stored |
 | 12 | W1: block ip.<zone> (stop N1) | Worker falls back on sslip.io, trace `ip-dns-fail,sslip.io` (forced path checked 2026-10-23; real outage not yet) |
 
+**Results on staging, 2026-10-24** (wisera delegated: `wisera.inojob.com NS nss1, nss2`):
+
+| # | Result |
+|---|---|
+| 2 | dash names stayed on Cloudflare + Worker, 200 throughout |
+| 3 | gateway serves the backend-issued Let's Encrypt cert for both names (no Traefik resolver, see G2) |
+| 4 | box wildcard + root from Let's Encrypt via acme-dns, probe `trusted`, both NS answer 80.241.218.30; dot names 200 directly from the box |
+| 5 | `--host immich gateway`: only `immich` A changes; owner path (`tools/set-dns-force.sh`, run by mesh-console) gateway/auto, both NS within ~2 s; `direct` refused |
+| 6 | not concluded: agent stopped 21:03 UTC, restarted 6.5 min later by another session working on wisera (before the 10-min route TTL ran out); to rerun with wisera free |
+| 7 | backend down, then primary down: both secondaries kept answering (user zone and ip.<zone>), wisera reachable; restart converged with no change |
+| 7b | wiped primary: zones rebuilt by the next pass, **but** recreated at `YYYYMMDD01`, below the secondaries' serials, so they ignored later changes; fixed in the backend (serial lifted above the nameservers' at creation and every 10 min), then changes reached both NS in ~2 s |
+| 7c | hand-edited A + rogue record on the primary: restored and removed by the next pass |
+| 8 | nss2 stopped: 1.1.1.1, 8.8.8.8, 9.9.9.9 resolved fresh names through nss1 in ~50 ms; nss2 caught up on restart |
+| 9 | gate sends the dot-form callback and Dex accepts it (login page, not "Unregistered redirect_uri"); full login with a password not run |
+| 10 | wisera before delegation, on the new template: adapted Caddy config identical to the old one (modulo upstream IPs), no orders |
+| 11 | spec + live: wrong signature 401, foreign subdomain 403 |
+| 12 | not run (needs both NS down; nss1 is ask-first) |
+
+Also found: deleting a member zone does not bump PowerDNS's producer catalog serial,
+so the secondaries kept serving removed zones (shadow mode switched off); the backend
+now bumps it. Turning on the dot form (`DNS_DOT_FORM=1`) makes Maison republish every
+app once (~1 min of 502 per app on wisera).
+
 ## 6. Open points
 
 - **Tunnel reachability from a gateway not co-located with the tunnel server** (the
   planned new VPS): chain to the co-located gateway, or have the tunnel server
   announce a reachable route. Needed before that host serves NAT boxes.
-- **Second nameserver** (staging and prod): host to choose (user). More pressing since
+- **Let's Encrypt rate limit at fleet scale:** each newly delegated user costs 3 new
+  certificates (box root, box wildcard, gateway); 50 new certs per registered domain
+  per week ≈ 16 delegations per week per zone until the PSL entry (O3) lands. Pace
+  batch delegation.
+- ~~**Second nameserver**~~ staging has nss1 + nss2 since 2026-10-23.
+- **Second nameserver** (prod): host to choose (user). More pressing since
   M1: route validation resolves `<ip>.<IP_ZONE>` through our single nameserver, so an
   outage makes boxes' direct routes fail registration (they fall back on the tunnel).
 - ~~`createForward()` parity~~ settled 2026-10-23: built-in rejected, own Lua include

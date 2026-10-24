@@ -296,11 +296,11 @@ Rules:
 Since the credential is the box's provider signature, any FOSS box registered with the
 backend can use it, Yundera-managed or not.
 
-The gateway is not a user, so it gets a second door onto the same challenge store:
-lego's `httpreq` protocol (`POST /present` and `/cleanup` with `{fqdn, value}`),
-authenticated with the backend's service key and limited to
-`_acme-challenge.<user>.<zone>` of delegated users. Traefik (lego) and any lego-based
-client use it as is.
+The gateways' own certificates for delegated users are issued by the backend itself
+(it owns the zone, so its DNS-01 needs no API) and fetched by every gateway per SNI
+(`GET /gateway/cert/<user>`). A lego-based client can still use the challenge store
+through `httpreq` (`POST /present` and `/cleanup` with `{fqdn, value}`, service key,
+delegated users only).
 
 ### 7.3 Box Caddy
 
@@ -612,7 +612,7 @@ Ships to prod with no change for any user who is not delegated. Staging test use
 | Nameserver | Metrics, external DNS monitor (SOA serial of primary vs every secondary), shadow log in the backend of the answer each user would get | Observation only |
 | Backend | Hostnames in route registration (optional field), per-host state, probes, force overrides, acme-dns API, new `/resolve/v2` fields | Additive; old agents and gateways ignore them |
 | Box | Pinned xcaddy image with `caddy-dns/acmedns`; wildcard site block enabled only for delegated boxes (flag in the mesh `.env`, set by Yundera); agent sends hostnames | Same behaviour as today otherwise, with a pinned tag |
-| Gateway | Delegated names go through the **existing** Traefik + OpenResty: Traefik gets a DNS-01 resolver (lego `httpreq` against the backend) and one router per delegated user. OpenResty only gets hygiene fixes. The edge mode (SNI passthrough, ACME forwarding) is Phase 2: passthrough to NAT boxes needs tunnel work, and ACME forwarding only serves HTTP-01, which Phase 1 doesn't use | Routers for delegated names only; other traffic unchanged |
+| Gateway | OpenResty terminates TLS itself with a certificate per SNI: the backend-issued certificate for delegated users, a self-signed fallback for everything else (Cloudflare "Full"). Behind a shared Traefik, one generic TCP passthrough rule for `*.<zone>`; on its own host it listens on 443. Nothing per user in Traefik (revised 2026-10-24). ACME forwarding and passthrough to NAT boxes are Phase 2 | Dash names unchanged (same self-signed origin cert behind Cloudflare) |
 | nip.io | Worker fallback moves from nip.io to sslip.io; Maison stops rendering nip routes; agent drops its nip route | The `ip.<zone>` path already carries the traffic (116 requests, 0 fallbacks at the prod switch) |
 | Mail | SPF `include:sendgrid.net`, DMARC reports; contact alias off Email Routing | Improves today's setup |
 | Dashboard | Per-host state table + force toggle; the Worker honours `force=gateway` too | Force works for every user, delegated or not |
