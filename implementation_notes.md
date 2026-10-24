@@ -475,6 +475,10 @@ today). Plus the owner's own toggle *route through the gateway* (B7, `gateway`/`
 
 ## 3. Order (staging)
 
+Progress: [`status.md`](status.md). G1, B8, W1, M1 and T5 are committed and pushed
+(2026-10-23); staging runs G1/B8/W1/M1, T5 reaches staging boxes at their next
+self-check. Prod is not started.
+
 ```
 G1, B8, W1+M1 ──────────────────────────────► independent, ship any time
 N1 ─► N2 (secondary replaces sslip.io on ns-ip.inojob.com, diff-gated)
@@ -483,7 +487,7 @@ C1+C3 ─► T1+T2+T3 ─► T4                (template main; no effect until d
 A1                                   (before dot-form SSO apps are tested)
 G2 (Traefik resolver + wisera router)
 O4 (delegate wisera) ─► §4 verification on wisera
-T5 after W1+M1 are on the whole staging fleet
+T5 after W1+M1 are on the whole staging fleet   (rides with the agent 1.1.3 pin: same template update)
 ```
 
 Mark wisera delegated (`nsl-router/{uid}.dns.delegated = true`, via `mesh-cli dns delegate wisera on`) **before** O4, so
@@ -521,14 +525,16 @@ place).
 | 9 | SSO app (A1) on dot form | login round trip OK |
 | 10 | A non-delegated staging box | byte-identical Caddy config, no dot-form labels, no ACME orders |
 | 11 | acme-dns with another user's credential | 401/403, nothing stored |
-| 12 | W1: block ip.<zone> (stop N1) | Worker falls back on sslip.io, trace `ip-dns-fail,sslip.io` |
+| 12 | W1: block ip.<zone> (stop N1) | Worker falls back on sslip.io, trace `ip-dns-fail,sslip.io` (forced path checked 2026-10-23; real outage not yet) |
 
 ## 6. Open points
 
 - **Tunnel reachability from a gateway not co-located with the tunnel server** (the
   planned new VPS): chain to the co-located gateway, or have the tunnel server
   announce a reachable route. Needed before that host serves NAT boxes.
-- **Second staging nameserver**: host to choose (user).
+- **Second nameserver** (staging and prod): host to choose (user). More pressing since
+  M1: route validation resolves `<ip>.<IP_ZONE>` through our single nameserver, so an
+  outage makes boxes' direct routes fail registration (they fall back on the tunnel).
 - ~~`createForward()` parity~~ settled 2026-10-23: built-in rejected, own Lua include
   579/581 (N1).
 - ~~PowerDNS major version~~ settled 2026-10-23: 5.1 (`pdns-auth-51`), same on

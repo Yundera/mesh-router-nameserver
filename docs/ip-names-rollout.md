@@ -50,6 +50,21 @@ dig +short +tcp @151.115.96.14 app-1-2-3-4.ip.inojob.com   # 1.2.3.4
 | A | `ns-ip` | `151.115.96.14` | DNS only |
 | NS | `ip` | `ns-ip.inojob.com` | — |
 
+**Since 2026-10-23** (PowerDNS secondaries, `deploy/secondary/`): two nameservers, renamed
+after their hosts. `ns-ip` is gone from the delegation; its `A` record is removed once
+nothing resolves it any more.
+
+| Type | Name | Value | Proxy |
+|---|---|---|---|
+| A | `nss1` | `51.15.79.231` (own host) | DNS only |
+| A | `nss2` | `151.115.96.14` (nasselle, next to the primary) | DNS only |
+| NS | `ip` | `nss1.inojob.com` | — |
+| NS | `ip` | `nss2.inojob.com` | — |
+
+Both nodes: `NS_HOSTS=nss1.inojob.com,nss2.inojob.com`; primary `DNS_SOA_NS=nss1.inojob.com`.
+The `.env` must list exactly the Cloudflare `NS ip` set. DNS only matters: `*.inojob.com`
+is a proxied wildcard, so a proxied NS host would resolve to Cloudflare.
+
 Check: `dig NS ip.inojob.com @peaches.ns.cloudflare.com +norec` shows the NS in the
 AUTHORITY section (`dig +short NS` prints nothing for a delegation — that is normal), and
 `dig +short @1.1.1.1 app-1-2-3-4.ip.inojob.com` returns `1.2.3.4`.
