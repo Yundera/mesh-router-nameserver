@@ -16,7 +16,18 @@ self-check script), dot form always on. Details: `implementation_notes.md`
   `https://nsl.sh/router/api/dns/health` (user).
 - N3 decided: zone file in server_conf, loaded into the primary outside the catalog;
   needs the Cloudflare export (O1).
-- Gateway certificate list (uncommitted): backend `GET /gateway/certs`, gateway
+- Dash/dot switch (uncommitted): `MESH_PRIMARY_FORM` + `tools/set-primary-form.sh`
+  (template), App addresses card (mesh-console), honoured only while the box serves
+  the dot form. Tested on wisera both ways, through the console. Apps installed from a
+  pre-`routes` listing keep their own labels: they follow only after a store update.
+- `live` flag fixed (uncommitted): refreshed before expiry, a lookup error keeps the
+  last value (wisera flipped "not delegated" every 20-30 min); Caddy downgrades only
+  after 3 readings. Staging on `mesh-router-backend:2.0.36-live-local` (backup
+  `*.bak-2026-10-25-live`); wisera on test images + `UPDATE_URL=file:///root/template-form.tar.gz`
+  until Yundera resets it at 03:00.
+- Prod cookbook: [`docs/phase1-prod-rollout.md`](docs/phase1-prod-rollout.md) (Worker → demo →
+  backend + primary → nameserver swap → gateway → template stable), for the user to run.
+- Gateway certificate list: backend `GET /gateway/certs`, gateway
   `certlist.lua` (only listed users are fetched; dash-name handshakes cost no backend
   call) + the per-worker certificate cache fixed (1.3.0 fetched on every handshake).
   Staging on `mesh-router-backend:2.0.35-certlist-local` and
