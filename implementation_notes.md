@@ -581,12 +581,12 @@ place).
 | 3 | gateway serves the backend-issued Let's Encrypt cert for both names (no Traefik resolver, see G2) |
 | 4 | box wildcard + root from Let's Encrypt via acme-dns, probe `trusted`, both NS answer 80.241.218.30; dot names 200 directly from the box |
 | 5 | `--host immich gateway`: only `immich` A changes; owner path (`tools/set-dns-force.sh`, run by mesh-console) gateway/auto, both NS within ~2 s; `direct` refused |
-| 6 | not concluded: agent stopped 21:03 UTC, restarted 6.5 min later by another session working on wisera (before the 10-min route TTL ran out); to rerun with wisera free |
+| 6 | agent stopped: once its route expired (556 s, route TTL 600 s) both NS answered the gateway; dot names stayed valid through the gateway (Let's Encrypt cert, 302/200), dash names went `cf-worker,gateway,tunnel,pcs`; agent back → direct again within 10 s |
 | 7 | backend down, then primary down: both secondaries kept answering (user zone and ip.<zone>), wisera reachable; restart converged with no change |
 | 7b | wiped primary: zones rebuilt by the next pass, **but** recreated at `YYYYMMDD01`, below the secondaries' serials, so they ignored later changes; fixed in the backend (serial lifted above the nameservers' at creation and every 10 min), then changes reached both NS in ~2 s |
 | 7c | hand-edited A + rogue record on the primary: restored and removed by the next pass |
 | 8 | nss2 stopped: 1.1.1.1, 8.8.8.8, 9.9.9.9 resolved fresh names through nss1 in ~50 ms; nss2 caught up on restart |
-| 9 | gate sends the dot-form callback and Dex accepts it (login page, not "Unregistered redirect_uri"); full login with a password not run |
+| 9 | full login in a browser on `files.wisera.inojob.com` (Dex → Local Account/Authelia → gate callback on the dot host): lands on the app signed in. mesh-console 1.8.0 Diagnostics: the diagram's "Answer the gateway" + Confirm sets `force: gateway` (both NS within seconds), "Back to automatic" restores `auto`/direct; the routing force untouched |
 | 10 | wisera before delegation, on the new template: adapted Caddy config identical to the old one (modulo upstream IPs), no orders |
 | 11 | spec + live: wrong signature 401, foreign subdomain 403 |
 | 12 | not run (needs both NS down; nss1 is ask-first) |
