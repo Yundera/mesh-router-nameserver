@@ -1,3 +1,25 @@
+# Status — box zone in caddy (2026-10-25)
+
+Released (pushed): **mesh-router-caddy v1.4.0** (`14b53b0`) and template `b4f0f4f`:
+the box decides its own zone TLS from the backend's `dns.live` (no `.env` flag, no
+self-check script), dot form always on. Details: `implementation_notes.md`
+"Box zone, revised".
+
+- Staging backend on `ghcr.io/yundera/mesh-router-backend:2.0.33` (backup
+  `docker-compose.yml.bak-2026-10-25-2033`); wisera still `live`, answer direct.
+- wisera back on template `main` (`UPDATE_URL` = main tarball; backup
+  `.env.bak-2026-10-25-main`), caddy `1.4.0` published image, zone file "delegated",
+  root + dot names on Let's Encrypt; test image and tarballs removed.
+- DNS monitor: `GET /router/api/dns/health` (backend, uncommitted), staging on
+  `mesh-router-backend:2.0.34-health-local` (backup `docker-compose.yml.bak-2026-10-25-health`);
+  UptimeRobot monitors on `https://inojob.com/router/api/dns/health` and later
+  `https://nsl.sh/router/api/dns/health` (user).
+- N3 decided: zone file in server_conf, loaded into the primary outside the catalog;
+  needs the Cloudflare export (O1).
+- Open: remove the stale `data/dns/` in a later release.
+
+---
+
 # Status — DNS delegation track (2026-10-24)
 
 Plan and results: [`implementation_notes.md`](implementation_notes.md) ("Built", §5

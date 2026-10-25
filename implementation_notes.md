@@ -13,6 +13,10 @@
 
 > **Built 2026-10-24** (staging, wisera delegated): see "Built" below; §1 and G2 were
 > revised the same day (the gateway terminates TLS itself, no per-user Traefik config).
+> **Revised 2026-10-25:** the box side (T1, T3, T4, C3 inputs) moved into
+> mesh-router-caddy 1.4.0, which decides from the backend's `dns.live` by itself; the
+> dot form is always on. `ensure-dns-delegation.sh`, `DNS_DOT_FORM` and `data/dns/`
+> are gone. See "Box zone, revised" before §T.
 
 ## Built (2026-10-24)
 
@@ -27,6 +31,8 @@
 | C1 | mesh-router-caddy | v1.3.0 | pinned xcaddy build: Caddy 2.11.4, docker-proxy v2.13.1, caddy-dns/acmedns v0.7.0; `test/dns01/run.sh` (Pebble) |
 | C3 | mesh-router-caddy | v1.3.1, v1.3.2 | `/data/dns/tls_passthrough` (own certs instead of cert0); `/data/dns/tls_automate` → `apps.tls.certificates.automate` (v1.3.2, see C3) |
 | T1–T4 | mesh-router-template-root | `294cbaa`, `2589e87` | Caddyfile hooks, `ensure-dns-delegation.sh`, dot form for store apps only, `tools/set-dns-force.sh`; pins caddy 1.3.2, mesh-auth 1.1.9, mesh-console 1.7.0 |
+| C3, T1, T3, T4 (rev.) | mesh-router-caddy, mesh-router-template-root | caddy v1.4.0, template `b4f0f4f` | caddy writes `/data/mesh-zone.caddy` itself; static `*.<domain>` site; dot form always on; migration `2026-10-25-01`; supersedes the `data/dns/` hooks and `ensure-dns-delegation.sh` (see "Box zone, revised") |
+| Monitor | mesh-router-backend | next (after v2.0.33) | `GET /router/api/dns/health` (public): each nameserver answers `ip.<zone>` and holds the catalog and its members at the primary's serial (5 min grace); 200 ok / 500 degraded / 503 down, cached 1 min, user zones counted not named. Watched by UptimeRobot (user), one monitor per environment. Staging-tested 2026-10-25: nss2 stopped → 500, primary stopped → 500 |
 | A1 | mesh-router-auth | v1.1.9 | `REDIRECT_DOT_SUFFIXES` → `<app>.<suffix>` callbacks after the dash ones |
 | W2 | mesh-router-gateway-cf | v1.1.6 | `dns.force`/`hostForce` = `X-Mesh-Force: gateway` (header still wins); staging deployed 2026-10-24, effective within the 60 s resolve cache |
 | B7 UI | mesh-console | v1.7.0 | Diagnostics › Nameserver: answer + "Route through the gateway" (host verb `tools/set-dns-force.sh`; the console never holds the signature) |
@@ -135,6 +141,14 @@ The public NS hosts switch from `cunnie/sslip.io-dns-server@sha256:…` to the N
 secondary (the sslip.io files in `deploy/` stay until prod has switched too). Keep the `${PUBLIC_IP}:53` binding (systemd-resolved holds
 127.0.0.53). On nasselle, the secondary reaches the primary over the backend stack
 network; on any other host, over the published primary port.
+
+**N3, decided 2026-10-25 (user), Phase 1:** the zone file lives in the server config
+(`/workspace/config/mesh-router/backend/pdns-primary/zones/<zone>.zone`, git
+`ApteroSAS/server_conf`), one per environment, and is **loaded into the hidden primary
+outside the catalog**: secondaries never get it, the backend's zone clean-up ignores
+it (catalog members only). The scheduled check compares the primary's answers with
+Cloudflare's; at cutoff the zone joins the catalog. Needs the Cloudflare export (O1)
+once. Original plan:
 
 **N3. Static zone file** (`zones/inojob.com.zone`, `zones/nsl.sh.zone`,
 `scripts/check-zone.sh`). From the Cloudflare export (still to get). The check
@@ -338,6 +352,37 @@ directories count as "the box has its certificate". Original plan:
 iteration and insert one `{"match":{"sni":[…]}}` policy right before the cert0
 catch-all, next to `*.sslip.io`; extend the "already injected" check so a changed
 file re-injects. Absent file = today's behaviour exactly.
+
+### Box zone, revised (2026-10-25)
+
+Capability over config: nothing on the box is told it is delegated; mesh-router-caddy
+(entrypoint, "BOX ZONE") asks the backend (`/resolve/v2/<label>` → `dns.live`, with
+`PROVIDER_STR`) at start and every `ZONE_CHECK_INTERVAL` (120 s), and writes
+`/data/mesh-zone.caddy`, which the Caddyfile imports:
+
+| Snippet | Not delegated | Delegated |
+|---|---|---|
+| `(zone_root_tls)`, the root `<domain>` | `import gateway_tls` | `tls { dns acmedns {…} }` |
+| `(zone_tls)`, the static `*.<domain>` site | `tls internal` (local wildcard: Caddy orders nothing per `<app>.<domain>` label) | same DNS-01 block |
+
+The `tls_automate` (root) and `tls_passthrough` (names whose ACME cert is in storage,
+`acme*/` dirs only) lists are computed in memory; caddy-docker-proxy picks the zone
+file up at its next generation (≤ 5 min), no restart. Start-up: backend retried 6
+times, then the last state (`/data/mesh-zone.state`), then "delegated" if an ACME
+wildcard for the domain is in storage, else not delegated.
+
+The dot form is unconditional (store apps and platform stacks; Dex and Authelia
+`nodot`); Maison's default domain stays the dash form, so the user sees nothing until
+the dot form becomes the primary. The registrar gets `REDIRECT_DOT_SUFFIXES=${DOMAIN}`
+from the auth compose.
+
+**Rollout lesson (wisera, ~7 min of "unknown CA" on dot names):** caddy-docker-proxy
+silently drops every block whose `import` file is missing. An old Caddy that reads
+the new Caddyfile (stack update failed before the Caddy recreate) lost its sites; the
+migration now seeds `mesh-zone.caddy` (old delegated state carried over) before the
+new Caddyfile lands. `data/dns/` is left in place, to remove in a later release.
+
+T1, T3 and T4 below are the original (superseded) plan.
 
 ### T — mesh-router-template-root (and template-root)
 
@@ -593,8 +638,8 @@ place).
 
 Also found: deleting a member zone does not bump PowerDNS's producer catalog serial,
 so the secondaries kept serving removed zones (shadow mode switched off); the backend
-now bumps it. Turning on the dot form (`DNS_DOT_FORM=1`) makes Maison republish every
-app once (~1 min of 502 per app on wisera).
+now bumps it. Turning on the dot form (`DNS_DOT_FORM=1`, since 2026-10-25 always on)
+makes Maison republish every app once (~1 min of 502 per app on wisera).
 
 ## 6. Open points
 
