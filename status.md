@@ -16,6 +16,11 @@ self-check script), dot form always on. Details: `implementation_notes.md`
   `https://nsl.sh/router/api/dns/health` (user).
 - N3 decided: zone file in server_conf, loaded into the primary outside the catalog;
   needs the Cloudflare export (O1).
+- Gateway certificate list (uncommitted): backend `GET /gateway/certs`, gateway
+  `certlist.lua` (only listed users are fetched; dash-name handshakes cost no backend
+  call) + the per-worker certificate cache fixed (1.3.0 fetched on every handshake).
+  Staging on `mesh-router-backend:2.0.35-certlist-local` and
+  `mesh-router-gateway:1.3.1-certlist-local` (backups `*.bak-2026-10-25-certlist`).
 - `data/dns/` cleanup: template migration `2026-10-25-10-remove-stale-dns-state.always.sh`
   (waits until the running Caddy no longer mounts it).
 - Open (user, 2026-10-25): a switch (env or a button somewhere relevant) between the
