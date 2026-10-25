@@ -16,7 +16,12 @@ self-check script), dot form always on. Details: `implementation_notes.md`
   `https://nsl.sh/router/api/dns/health` (user).
 - N3 decided: zone file in server_conf, loaded into the primary outside the catalog;
   needs the Cloudflare export (O1).
-- Open: remove the stale `data/dns/` in a later release.
+- `data/dns/` cleanup: template migration `2026-10-25-10-remove-stale-dns-state.always.sh`
+  (waits until the running Caddy no longer mounts it).
+- Open (user, 2026-10-25): a switch (env or a button somewhere relevant) between the
+  dash and the dot form as the box's primary name.
+- Owner "route through the gateway" switch in mesh-dashboard: postponed to Phase 2
+  (mesh-console has it; the backend route stays).
 
 ---
 
@@ -57,8 +62,8 @@ secondaries, empty `hostForce` removed.
 
 ## Open
 
-- Checklist #12 (real ip.<zone> outage: needs both NS down) and a full SSO login on
-  a dot-form name (#9).
+- Checklist #12 (real ip.<zone> outage: needs both NS down). #9 passed in the browser
+  (see implementation_notes §5 results).
 - Rotate the staging SendGrid key (printed in a session log on 2026-10-24).
 - Let's Encrypt pacing for batch delegation (implementation_notes §6) until the PSL entry.
 - Out of scope for now: IPv6 (dot names have no AAAA), second gateway host and tunnel
