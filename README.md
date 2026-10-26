@@ -1,123 +1,152 @@
 # mesh-router-nameserver
 
-Authoritative DNS server for the `nsl.sh` zone (and any other vanity zones Yundera
-delegates to it). It answers `<user>.nsl.sh` / `*.<user>.nsl.sh` queries with a
-**per-user policy decision**:
+The mesh's authoritative DNS. It is **stock PowerDNS Authoritative 5.1** with this repo's
+config baked in: one image, two roles, no DNS code of our own beyond one Lua include.
 
-- if the user's PCS has been confirmed **direct-eligible** (public IPv4 + a real,
-  browser-trusted TLS cert reachable on `:443`) → return an `A` record pointing
-  **straight at the PCS public IP**;
-- otherwise → return a `CNAME` to the **gateway** (Cloudflare Worker / OpenResty),
-  exactly as traffic flows today.
+It serves two kinds of names under the server zone (`nsl.sh` on prod, `inojob.com` on
+staging):
 
-This lets a user's connection **transparently upgrade** from "proxied through the
-gateway" to "direct to my own box, on my own pretty domain, with a real
-certificate", and silently **downgrade** back to the gateway if the box goes behind
-NAT, loses reachability, or its cert lapses — with no change to the name the user
-types.
+- **IP-encoded names**, our own nip.io: `<app>-<dashed-ip>.ip.<zone>` → `<ip>`, answered
+  only for IPs registered by a real box's agent. The CF Worker and the gateway reach
+  boxes directly through them.
+- **Per-user zones** (`<user>.<zone>`) for users whose zone is delegated to us: the box
+  or gateway address, plus the `_acme-challenge` TXT records that give the box its DNS-01
+  wildcard certificate.
 
-> **Status: design / not yet implemented.** This repo currently contains only the
-> design docs. See [`docs/architecture.md`](docs/architecture.md) for the full
-> picture and [`implementation_notes.md`](implementation_notes.md) for the build plan
-> mapped to concrete files in the rest of the mesh-router stack.
+The records come from `mesh-router-backend`. This service only stores and serves them.
 
-## Why this exists
-
-Today users only ever type `app.john.nsl.sh`. That name is always served **through
-the gateway** (CF Worker → `nip.io`, or OpenResty → PCS IP). The `*.sslip.io` /
-`*.nip.io` names are ugly, IP-encoded **break-glass fallbacks** that nobody types.
-
-A PCS with a public IPv4 is perfectly capable of serving its own apps directly with
-a real Let's Encrypt certificate — in fact it **already does** for
-`<dashed-ip>.sslip.io` via HTTP-01 (see `mesh-router-caddy/Caddyfile`). The only
-missing piece is a nameserver that hands out the PCS's own IP for the **vanity**
-`nsl.sh` name when (and only when) the box can actually serve it. That nameserver is
-this service.
-
-## What it does NOT do
-
-- It is **not** stateless like sslip.io/nip.io. Those encode the IP in the hostname
-  (`1-2-3-4.nsl.sh → 1.2.3.4`, pure pattern match). This service does a **per-user
-  lookup**: `<user>.nsl.sh → that user's registered PCS IP`. Different problem.
-- It holds **no state of its own**. Every answer is derived from the existing route
-  store (Firestore `nsl-router` identity + Redis routes) read through the backend's
-  `GET /resolve/v2/:user` API. Restarting it loses nothing.
-- It does **not** terminate TLS, proxy traffic, or issue certs. It only answers DNS.
-
-## Where it sits
+## How it works
 
 ```
-                         ┌────────────────────────────┐
-   DNS query             │   mesh-router-nameserver    │   HTTP
- *.nsl.sh  ───────────►  │   (this service, x2 for HA) │ ───────► mesh-router-backend
-                         │   stateless DNS→HTTP adapter │   GET /router/api/resolve/v2/:user
-                         └──────────────┬──────────────┘          (+ dnsDirect flag)
-                                        │
-              direct-eligible? ─────────┴───────── not eligible
-                    │                                   │
-            A  <PCS public IPv4>              CNAME  gw-edge.nsl.sh
-            (low TTL, real LE cert)           (Cloudflare-proxied gateway)
+mesh-router-backend ── allowlist, user zones, ACME challenges
+   │  PowerDNS HTTP API (backend stack network only)
+   ▼
+hidden primary  (ROLE=primary, sidecar in the backend stack, in no NS record)
+   │  NOTIFY + AXFR, transfers allowed only to the secondaries' IPs
+   ├──► public secondary 1  (ROLE=secondary) ─┐  the zone's NS records,
+   └──► public secondary 2  (ROLE=secondary) ─┘  on different hosts
 ```
 
-## Companion changes (live in other repos)
+- **One writer.** Only the backend writes, and only to the primary. Sync to the public
+  nameservers is plain DNS: NOTIFY, then a zone transfer (about 1 s).
+- **New zones need no config.** The primary is a catalog-zone producer (RFC 9432), and
+  the secondaries consume it, so a zone created or deleted through the API appears or
+  disappears on every secondary by itself.
+- **`ip.<zone>` is never transferred**, because its names are unbounded. Each secondary
+  builds it locally at start: one wildcard `LUA` record that calls `image/lua/ipname.lua`.
+  The include parses the IP the way sslip.io does (dashed, dotted or hex IPv4, dashed
+  IPv6). It then answers only if the IP is listed in the transferred allowlist zone
+  `allow.<ip-zone>.invalid`. Any other IP-shaped name gets an empty answer.
+- **Nothing to back up.** The primary is rebuilt from backend state by its next reconcile
+  pass, and the secondaries hold only copies.
 
-This service is the only genuinely new daemon, but the feature needs small changes
-elsewhere in `mesh-router-root` — all detailed in
-[`implementation_notes.md`](implementation_notes.md):
+| Zone | Primary | Secondaries |
+|---|---|---|
+| catalog (`catalog.<zone>.invalid`) | producer | consumer |
+| `allow.<ip-zone>.invalid` | written by the backend | transferred |
+| `<user>.<zone>`, delegated users | written by the backend | transferred |
+| `ip.<zone>` | — | local Lua wildcard, built from env |
 
-| Repo / file | Change |
-|---|---|
-| `mesh-router-backend` — `Probe.ts`, `RouteValidator.ts`, `Routes.ts`, `RouterAPI.ts` | Compute & expose a `dnsDirect` eligibility flag in `/resolve/v2` (much of this already exists) |
-| `mesh-router-caddy` — `Caddyfile`, `entrypoint.sh` | On-demand TLS for `*.nsl.sh` via real Let's Encrypt (mirror the existing sslip.io block) |
-| `mesh-router-agent` | Report candidate public IPv4; host the on-demand TLS `ask` endpoint |
-| DNS registrar + ops | Delegate `nsl.sh` NS to this service; submit `nsl.sh` to the **Public Suffix List** |
+Design and rationale: [`docs/architecture.md`](docs/architecture.md). IP-encoded names
+and the Cloudflare tests behind them: [`docs/ip-names.md`](docs/ip-names.md).
+
+## Image
+
+`ghcr.io/yundera/mesh-router-nameserver`, published by `.github/workflows/docker.yml`
+after the smoke test passes: `:main` on every push to `main`, `X.Y.Z` and `X.Y` on a
+`vX.Y.Z` tag. The base is `powerdns/pdns-auth-51`, pinned by digest. A host carries only a
+compose file and an `.env`.
+
+| `ROLE` | Required env | Optional |
+|---|---|---|
+| `primary` | `PDNS_AUTH_API_KEY`, `DNS_SOA_NS` (first public NS name), `DNS_SECONDARY_IPS` (every secondary, as the primary sees it) | — |
+| `secondary` | `IP_ZONE`, `NS_HOSTS` (every public NS name, comma list, first = SOA mname), `SOA_RNAME`, `CATALOG_ZONE`, `PRIMARY_IP` | `PRIMARY_PORT` (53) |
+
+If a variable is missing, the container stops and prints its name. Each secondary
+rebuilds `ip.<zone>` from env on every start, so changing `NS_HOSTS` only needs a
+recreate. `TEMPLATE_FILES` adds an operator template mounted in
+`/etc/powerdns/templates.d/`.
+
+## Running it
+
+**Public secondary**: one per host, on UDP and TCP 53:
+
+```yaml
+services:
+  nameserver:
+    image: ghcr.io/yundera/mesh-router-nameserver:1.3.2
+    restart: unless-stopped
+    environment:
+      - ROLE=secondary
+      - IP_ZONE=ip.example.com
+      - NS_HOSTS=ns1.example.com,ns2.example.com
+      - SOA_RNAME=dns.example.com
+      - CATALOG_ZONE=catalog.example.com.invalid
+      - PRIMARY_IP=203.0.113.10        # the primary's host
+      - PRIMARY_PORT=5300              # the primary's published port
+    volumes:
+      - nameserver-data:/var/lib/powerdns
+    ports:
+      # the public IP, not 0.0.0.0: systemd-resolved holds 127.0.0.53/54:53
+      - "198.51.100.20:53:53/udp"
+      - "198.51.100.20:53:53/tcp"
+volumes:
+  nameserver-data:
+```
+
+**Hidden primary**: a sidecar in the backend's compose. It shares a network with the
+backend, which sets `PDNS_API_URL=http://pdns-primary:8081`, `PDNS_API_KEY` and
+`DNS_IP_ZONE`. It publishes nothing unless a secondary lives on another host. In that
+case, publish it on a non-standard port (`<host-ip>:5300:53`, TCP and UDP) and list that
+secondary's public IP in `DNS_SECONDARY_IPS`. Transfers are restricted by IP only, not
+TSIG, because PowerDNS gives catalog member zones no TSIG key on the consumer.
+
+**Secondary on the primary's host**: put both on a shared network with fixed
+addresses, and point `PRIMARY_IP` at the primary's address on that network (port 53).
+The secondary's address on it goes into `DNS_SECONDARY_IPS`.
+
+`test/smoke/docker-compose.yml` is a complete working primary + secondary pair. CI runs
+it on every build.
+
+In the parent zone, each public name needs an `A` record (not proxied), plus
+`NS ip.<zone>` (and `NS <user>.<zone>` for each delegated user) listing every one of
+them.
+
+## Checking a node
+
+```sh
+dig +short @<node> NS ip.<zone>                       # every NS_HOSTS name
+dig +short @<node> maison-<dashed-box-ip>.ip.<zone>   # the box IP (allowlisted)
+dig +short @<node> 1-2-3-4.ip.<zone>                  # empty: not allowlisted
+dig +short @<node> SOA allow.<ip-zone>.invalid        # same serial on every node
+docker compose exec nameserver pdnsutil zone show <catalog-zone>   # "Last time we got update from primary"
+```
+
+The backend's `GET /router/api/dns/health` compares the primary with every
+nameserver. Don't treat it as proof that a new node has transferred, though: check the
+catalog consumer with `pdnsutil zone show` until it reports an update.
+
+## Tests
+
+- `sh test/smoke/run.sh` builds the image and runs a primary, a secondary and a client.
+  It checks API writes, catalog consumption, the allowlist transfer, gated answers and
+  NOTIFY.
+- `test/ipname/` compares `ipname.lua` against the sslip.io server, answer for answer,
+  over a 581-name corpus.
 
 ## Layout
 
 ```
 mesh-router-nameserver/
-├── README.md               ← you are here
-├── Dockerfile              ← image: stock PowerDNS + the config below, ROLE=primary|secondary
+├── Dockerfile            stock pdns-auth-51 + the files below
 ├── image/
-│   ├── entrypoint.sh       ← checks env per role, builds the secondary's local zones, starts pdns
-│   ├── templates/          ← primary.j2, secondary.j2 (rendered by the stock startup)
-│   └── lua/ipname.lua      ← gated ip.<zone> wildcard (sslip.io rule + allowlist lookup)
-├── deploy/
-│   ├── primary/            ← pdns-primary sidecar for the backend stack (compose fragment)
-│   ├── secondary/          ← public nameserver: compose, colocated override, .env.example
-│   └── *.yml, .env.example ← legacy ip.<zone> nameserver (sslip.io server), until prod switches
+│   ├── entrypoint.sh     checks env per ROLE, builds the secondary's local zones
+│   ├── templates/        primary.j2, secondary.j2 (rendered by the stock startup)
+│   └── lua/ipname.lua    ip.<zone> wildcard: sslip.io parsing + allowlist lookup
 ├── test/
-│   ├── smoke/              ← CI: primary + secondary + gated answers + NOTIFY (`sh test/smoke/run.sh`)
-│   └── ipname/             ← parity of ipname.lua with the sslip.io server
-├── docs/
-│   ├── architecture.md     ← resolution flow, eligibility, cert bootstrap, fallback tiers
-│   ├── ip-names.md         ← stateless nip.io-style names (<app>-<ip>.ip.nsl.sh), CF test
-│   └── ip-names-rollout.md ← staging record + prod cookbook for the ip.<zone> nameserver
-└── implementation_notes.md ← build plan, file-by-file mapping, rollout order, open questions
+│   ├── smoke/            CI: primary + secondary end to end
+│   └── ipname/           parity of ipname.lua with the sslip.io server
+└── docs/
+    ├── architecture.md   design: answers, certificates, gateway edge, topology
+    └── ip-names.md       IP-encoded names, Cloudflare subzone tests
 ```
-
-## Image
-
-`ghcr.io/yundera/mesh-router-nameserver`, published by `.github/workflows/docker.yml`:
-`:main` on every push to `main`, `X.Y.Z` + `X.Y` on a `vX.Y.Z` tag, after the smoke
-test passes. It is `powerdns/pdns-auth-51` (pinned by digest) with this repo's config
-baked in, so a host carries only `docker-compose.yml` + `.env`: no scripts, no
-templates, no Lua.
-
-| `ROLE` | Required env | Optional |
-|---|---|---|
-| `primary` | `PDNS_AUTH_API_KEY`, `DNS_SOA_NS`, `DNS_SECONDARY_IPS` | — |
-| `secondary` | `IP_ZONE`, `NS_HOSTS`, `SOA_RNAME`, `CATALOG_ZONE`, `PRIMARY_IP` | `PRIMARY_PORT` (53) |
-
-A missing variable stops the container with its name. `TEMPLATE_FILES` still works
-for an extra template mounted into `/etc/powerdns/templates.d/` (rendered after the
-role's own).
-
-## Quick links
-
-- **Architecture & rationale** → [`docs/architecture.md`](docs/architecture.md)
-- **Build plan & file mapping** → [`implementation_notes.md`](implementation_notes.md)
-- Parent stack context → `../CLAUDE.md` (mesh-router-root), the resolvers
-  (`mesh-router-gateway/nginx/lua/resolver.lua`,
-  `mesh-router-gateway-cf/src/index.ts`), and the backend API
-  (`https://nsl.sh/router/api/`).

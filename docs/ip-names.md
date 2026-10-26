@@ -1,14 +1,9 @@
 # IP-encoded names — our own nip.io
 
-> Design + test notes, 2026-10-21. **Live on staging** (nameserver on the nasselle
-> staging server, worker `IP_ZONE=ip.inojob.com`) **and on prod since 2026-10-22**
-> (nameserver on `yundera-prod`, worker `IP_ZONE=ip.nsl.sh`); rollout record and prod
-> cookbook: [`ip-names-rollout.md`](ip-names-rollout.md). §7 used an interim test
-> nameserver on holyhorse.
->
-> **Planned change (2026-10-23):** the PowerDNS replacement answers only IPs registered
-> by a real user's agent, not any IP as below; see [`architecture.md`](architecture.md)
-> §3.3 and §10.2.
+> Design + test notes, 2026-10-21. Live on staging and prod since 2026-10-22. Served
+> first by the stock sslip.io server (§4), and since 2026-10-23 by the PowerDNS
+> secondaries, which answer only IPs registered by a real box's agent (§5 is done that
+> way: [`architecture.md`](architecture.md) §3.3 and §10.2).
 
 ## 1. Goal
 
@@ -105,10 +100,10 @@ server; Safe Browsing / corporate filters then flag the domain and every custome
   (Redis, `/resolve/v2`); everything else → `NXDOMAIN`;
 - refuse private / reserved ranges outright (`Probe.isLanOrReserved`) — the Worker
   cannot reach them anyway, and it removes the DNS-rebinding use;
-- needs code: either a fork of the sslip.io server with an allowlist hook, or the
-  rule moves into the per-user NS (CoreDNS plugin, `implementation_notes.md` §1) which
-  already reads the backend. Cache the IP set locally and fail **open to the last
-  known set**, never to "answer everything".
+- built 2026-10-23 without a fork: the backend writes the allowlist zone, the
+  PowerDNS Lua include looks each IP up in it, and a grace period keeps the last known
+  set through short outages, never failing open to "answer everything"
+  ([`architecture.md`](architecture.md) §10.2–§10.3).
 
 Not done in Phase 1 by decision: parity first, restriction second.
 

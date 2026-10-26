@@ -2,10 +2,12 @@
 
 > Design document, decided 2026-10-22; nameserver topology (§10) revised 2026-10-23:
 > stock PowerDNS everywhere, the backend writes to a hidden primary, the public
-> nameservers are zone-transfer secondaries. Nothing in this document is built yet
-> except the `ip.<zone>` nameserver it grows out of ([`ip-names.md`](ip-names.md), live
-> on staging and prod). It replaces the June 2026 design (per-user `dnsDirect` flag,
-> Cloudflare kept in front); §14 records what changed and why.
+> nameservers are zone-transfer secondaries. Built so far: the topology (§10), the
+> gated `ip.<zone>` ([`ip-names.md`](ip-names.md)), per-user zone delegation with
+> DNS-01 and gateway certificates (Phase 1, §13.2). Staging has a delegated user
+> (wisera); prod runs the same stack with none delegated yet. It
+> replaces the June 2026 design (per-user `dnsDirect` flag, Cloudflare kept in front);
+> §14 records what changed and why.
 
 ## 1. Goal
 
@@ -549,7 +551,7 @@ extension; it needs the same probe on v6.
 
 | Component | Change |
 |---|---|
-| **mesh-router-nameserver** | No DNS code: PowerDNS config and deploy files for the hidden primary (backend sidecar) and the public secondaries, the `ip.<zone>` LUA zone, the static zone file and its checks (§10). |
+| **mesh-router-nameserver** | No DNS code: one PowerDNS image (`ROLE=primary|secondary`) for the hidden primary (backend sidecar) and the public secondaries, the `ip.<zone>` LUA zone, the static zone file and its checks (§10). |
 | **mesh-router-backend** | Per-host state + probes (§4, §5); hostnames in route registration; acme-dns API + challenge store (§7.2); force overrides; the **zone reconciler** writing to the hidden primary (§10.3); `mesh-cli dns` admin commands; reserved labels at signup (§3.4). |
 | **mesh-router-gateway** | Public edge: ACME forwarding, SNI passthrough, termination fallback with DNS-01 certs, rate limits, ≥2 instances (§6). |
 | **mesh-router-caddy** | Pinned xcaddy build with `caddy-dns/acmedns`; wildcard site block; entrypoint passes the user zone SNIs through instead of pinning cert0 (C3); real-LE on-demand for HTTP-01 names (§7.3, §7.4). |
