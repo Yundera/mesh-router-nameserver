@@ -30,7 +30,9 @@ secondary)
   # names as listed, without the trailing dot
   zones=$(pdnsutil zone list-all | sed "s/\.$//")
 
-  if ! echo "$zones" | grep -qxF "${CAT%.}"; then
+  # not from the list: zone list-all omits a consumer that never got its first transfer
+  # (no SOA yet), and recreating it fails, so a restart before that transfer crash-looped
+  if ! pdnsutil zone show "$CAT" >/dev/null 2>&1; then
     pdnsutil zone create-secondary "$CAT" "$PRIMARY_IP:$PRIMARY_PORT"
     pdnsutil zone set-kind "$CAT" consumer
   fi
