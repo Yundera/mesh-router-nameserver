@@ -106,6 +106,22 @@ Compatibility: adding the SAN is additive; switching the gateway's SNI needs eve
 re-issued (cert0 renewal, or a forced re-issue); dropping `*.<zone>` comes last, after the
 non-delegated root `<domain>` (still `import gateway_tls`) is checked against it.
 
+**Built 2026-10-27 (step 2), staging:** the backend signs every cert0 with
+`<label>.box.<zone>` and records it (`cert:hop:<uid>`, until the certificate expires);
+`/resolve/v2` returns `hopName` only while that record exists, and the gateway uses it as
+SNI for agent and tunnel routes, falling back to the previous SNI otherwise. cert0 lives
+72 h and the agent renews it at 36 h, so every live box carries the name within 36 h of
+the backend deploy. Verified on wisera after a forced re-issue: Caddy serves cert0 for the
+hop name, a capture of the gateway's handshakes shows only `wisera.box.inojob.com`, agent
+and routed tunnel paths answer.
+
+**Mesh-CA-only trust is deferred to step 6.** nginx takes one
+`proxy_ssl_trusted_certificate` per location, and while some boxes are still reached
+with the old SNI (host name, possibly answered with a Let's Encrypt certificate on a
+delegated box), the gateway needs the system bundle too. Once every box has a hop name,
+step 6 switches the bundle to the mesh CA alone in the same release that drops `*.<zone>`
+from cert0.
+
 ## 5. Tunnel: network layer, not HTTP
 
 Today a tunnel route is `http`: the gateway speaks HTTP to the tunnel entrance, TLS
