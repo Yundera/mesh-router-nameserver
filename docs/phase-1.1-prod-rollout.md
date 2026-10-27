@@ -200,7 +200,7 @@ ip route del 172.30.0.2/32 dev \$I; wg set \$I peer \$P allowed-ips 10.78.0.1/32
 - Template `stable` promotion (tunnel 1.4.0 for the fleet): `main` also carries other
   changes; separate decision.
 - Redis `requirepass` on the backend (defence in depth; needs `REDIS_URL` updated too).
-- Gateway image logs `vdev`: the CI workflow does not pass `BUILD_VERSION` (cosmetic).
+- Gateway image logs `vdev`: the CI workflow does not pass `BUILD_VERSION` (cosmetic; fixed in gateway 1.6.1).
 
 ---
 
@@ -226,9 +226,9 @@ Design and staging record: [`phase-1.1-gateway-tls.md`](phase-1.1-gateway-tls.md
 - Visible to users: nothing until a prod user is delegated (passthrough and CAA only
   concern delegated zones; cert0 keeps working for every path through gateway 1.5).
 
-## B. Gateway 1.6.0: mesh CA only on the hop (pending)
+## B. Gateway 1.6.1: mesh CA only on the hop (pending)
 
-1.6.0 connects to every box with SNI `<label>.box.<zone>` and trusts the mesh CA only. A
+1.6.x connects to every box with SNI `<label>.box.<zone>` and trusts the mesh CA only. A
 box whose cert0 predates backend 2.0.40 (no hop name) gets a **502** through the gateway
 (`upstream SSL certificate does not match "<label>.box.<zone>"`). cert0 lives 72 h and
 renews at 36 h, so every box carries its hop name by **2026-10-30 ~13:30 UTC** at the
@@ -264,26 +264,44 @@ done
 
 ```bash
 cd /workspace/config/mesh-router-nsl/gateway
-cp docker-compose.yml docker-compose.yml.bak-2026-10-30-160
-sed -i 's#mesh-router-gateway:1\.[0-9.]*#mesh-router-gateway:1.6.0#' docker-compose.yml
-diff docker-compose.yml.bak-2026-10-30-160 docker-compose.yml
+cp docker-compose.yml docker-compose.yml.bak-2026-10-30-161
+sed -i 's#mesh-router-gateway:1\.[0-9.]*#mesh-router-gateway:1.6.1#' docker-compose.yml
+diff docker-compose.yml.bak-2026-10-30-161 docker-compose.yml
 docker compose pull -q && docker compose up -d
 ```
 
-Check: the baseline again (same codes), then that no box fails verification:
+Check: the baseline again (same codes), then that no box fails verification. The
+gateway writes its errors to `/var/log/nginx/error.log` inside the container, **not** to
+`docker compose logs` (a count there stays 0 while boxes 502, seen on staging
+2026-10-27). The file starts empty with the recreated container:
 
 ```bash
 sleep 120
-docker compose logs --since 3m 2>&1 | grep -c "certificate does not match"
+G=$(docker compose ps -q | head -1)
+docker exec $G grep -c "certificate does not match" /var/log/nginx/error.log
 #   0
+docker exec $G grep "certificate does not match" /var/log/nginx/error.log \
+  | grep -o '"[^"]*\.box\.[^"]*"' | sort | uniq -c
+#   (lists each failing box's hop name)
 ```
 
-A non-zero count names the box (`.box.` name in the line): roll back, or leave it if it is
-a single box that is offline anyway, and look at its agent.
+The count only covers boxes that got a request through the gateway. To test one box
+directly, force the gateway path:
 
-Rollback: `cp docker-compose.yml.bak-2026-10-30-160 docker-compose.yml && docker compose up -d`.
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -H "X-Mesh-Force: gateway" https://mesh-console-<label>.nsl.sh/
+#   502 = the box's cert0 has no hop name yet
+```
 
-### B.2 After 1.6.0 holds on staging and prod
+A failing box: roll back, or leave it if it is a single box that is offline anyway, and
+look at its agent.
+
+Rollback: `cp docker-compose.yml.bak-2026-10-30-161 docker-compose.yml && docker compose up -d`.
+
+### B.2 After 1.6.1 holds on staging and prod
+
+Staging runs 1.6.1 since 2026-10-27 (deployed before `dns hops` was ready, on request:
+demostaging2 and followingcaterpillar 502 through the gateway until their renewal).
 
 - Backend: `hopName` in `/resolve/v2` and the `cert:hop:*` keys are only read by gateway
   1.5 and by `mesh-cli dns hops`; they can go in a later release.
