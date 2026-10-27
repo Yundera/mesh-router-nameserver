@@ -349,7 +349,25 @@ CAA as built (step 5, staging 2026-10-27):
    gateway certificates and revoke wisera's.
 5. **CAA** on wisera (§7), including a rebuild-style account change. **Done on staging
    2026-10-27.**
-6. Drop `*.<zone>` / `*.nip.io` from cert0.
+6. Drop `*.<zone>` / `*.nip.io` from cert0, mesh-CA-only trust on the hop, per-user
+   gateway certificates removed (backend `GatewayCerts`, `/gateway/cert[s]`; gateway
+   `certs.lua`, `certlist.lua`). **Built 2026-10-27, staging partly** (below).
+
+Step 6 rollout order (each environment):
+
+1. **Backend first, any time.** A cert0 without `*.<zone>` only comes from the new
+   backend, which also notes the hop name (`cert:hop:<uid>`, `hopName` in `/resolve/v2`):
+   gateway 1.5 then already connects with SNI `<label>.box.<zone>`. Staging 2026-10-27:
+   wisera's cert0 reissued (`*.ip.inojob.com`, `wisera.box.inojob.com`, IP), gateway,
+   routed tunnel and direct paths unchanged, no ACME attempt by Caddy for dash names
+   (they keep cert0 by tag). `*.ip.<zone>` stays: deployment config (`CERT_EXTRA_SANS`)
+   for the Worker's IP-name path, not a user's name.
+2. **Gateway 1.6 once every live box holds a hop name**: it always sends
+   `<label>.box.<zone>` and trusts the mesh CA only, so a box whose cert0 predates
+   backend 2.0.40 gets a 502 ("certificate does not match <label>.box.<zone>"; seen on a
+   side gateway against demostaging2). cert0 lives 72 h and renews at 36 h: wait until
+   `cert:hop:*` covers every user with routes (`routes:<uid>:*` in Redis), at the latest
+   72 h after the backend that adds the SAN (2.0.40: 2026-10-27 on both environments).
 
 Prod follows step by step once staging holds; no prod user is delegated yet, so steps 1,
 2 and 4 change nothing visible there until the first pilot.
