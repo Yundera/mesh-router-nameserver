@@ -126,7 +126,7 @@ name gets an empty answer. `ip.<zone>` stays a **separate zone**, delegated from
 ### 3.4 Reserved labels
 
 Signup and the nameserver share one reserved list: `ip`, `ns1`…`nsN`, `gw`/`gw1`…,
-`www`, `mail`, `acme`, `_acme-challenge`, `_dmarc`, `_domainkey`, `s1`, `s2`, `router`,
+`www`, `mail`, `acme`, `box`, `_acme-challenge`, `_dmarc`, `_domainkey`, `s1`, `s2`, `router`,
 plus every label present in the static zone (§9). Existing users are audited against
 it before delegation.
 
@@ -216,27 +216,24 @@ plus a spot check of one dash-form name if any).
 
 ## 6. The gateway as the edge
 
+> Revised 2026-10-27 by [`phase-1.1-gateway-tls.md`](phase-1.1-gateway-tls.md) (Phase
+> 1.1, not built yet). Phase 1 as shipped terminates every name at the gateway, with a
+> backend-issued `*.<user>.<zone>` per delegated user; 1.1 removes that certificate.
+
 Without Cloudflare the gateway is the public entry point for every name that is not
-direct. It does three things, in this order:
+direct. The rule: **a name's private key lives in exactly one place.** The gateway is
+an SNI router (OpenResty `stream` + `ssl_preread`), and the choice is syntactic:
 
-1. **ACME challenge forwarding.** `GET /.well-known/acme-challenge/<token>` on `:80`:
-   if the token is one of the gateway's own pending challenges, answer it; otherwise
-   forward the request to the box with the original `Host` (Caddy matches challenges
-   by Host). This is what lets a box pass HTTP-01 **before** DNS points at it, even
-   behind NAT (§7.4).
-2. **SNI passthrough.** If the host state says the box holds a trusted cert for the
-   SNI name, the gateway forwards the raw TLS stream (OpenResty `stream` +
-   `ssl_preread`) over the box's route, IP or tunnel. TLS ends on the user's box: the
-   gateway cannot read the traffic.
-3. **Termination fallback.** Otherwise the gateway terminates TLS with its own
-   certificate and proxies to the box as today (`<app>-<ip>.ip.<zone>` with the mesh
-   CA, or the tunnel).
+1. **Dash form, reserved labels → terminate** with the gateway's own `*.<zone>`
+   (DNS-01, challenge delegated to `acme.<zone>`), then re-encrypt to the box with SNI
+   `<label>.box.<zone>`, verified against the mesh CA only.
+2. **Dot form and user apex → raw passthrough** to the box's best route (public IP or
+   WireGuard address), with PROXY v2 for the client IP. TLS ends on the box; the
+   gateway holds no certificate for these names, so a box without its own certificate
+   has no working dot names (dash names still work), and an offline box fails at the
+   handshake instead of showing an offline page.
 
-Gateway certificates, all via DNS-01 against our own nameserver:
-
-- `*.nsl.sh`: covers every dash-form name and every user apex in one cert;
-- `*.<user>.nsl.sh`: issued on demand for dot-form names of users whose box has no
-  trusted cert yet (and renewed only while needed).
+No ACME challenge forwarding: dash names are never direct and dot names use DNS-01.
 
 What Cloudflare gave us for free and the gateway now owns: DDoS absorption, edge
 presence, HTTP/3. Minimum: two gateway instances on separate providers, both returned
@@ -300,7 +297,8 @@ backend can use it, Yundera-managed or not.
 
 The gateways' own certificates for delegated users are issued by the backend itself
 (it owns the zone, so its DNS-01 needs no API) and fetched by every gateway per SNI
-(`GET /gateway/cert/<user>`). A lego-based client can still use the challenge store
+(`GET /gateway/cert/<user>`). Phase 1 only: Phase 1.1 replaces them with a single
+`*.<zone>` and revokes the per-user ones ([`phase-1.1-gateway-tls.md`](phase-1.1-gateway-tls.md) §6). A lego-based client can still use the challenge store
 through `httpreq` (`POST /present` and `/cleanup` with `{fqdn, value}`, service key,
 delegated users only).
 
@@ -325,6 +323,10 @@ Pinning the base image also fixes today's unpinned `ci-alpine` tag.
 
 ### 7.4 HTTP-01
 
+> **Dropped in Phase 1.1** (2026-10-27): dash names terminate at the gateway and are
+> never direct, dot names use DNS-01, so nothing needs HTTP-01 or the gateway's
+> challenge forwarding. Kept below for the record.
+
 Used for dash-form aliases on a direct box, and for boxes whose ACME client has no
 acme-dns support. Caddy on-demand TLS with **real Let's Encrypt** for the user's names,
 gated by the `ask` endpoint (the box only asks for names under its own user). Because
@@ -337,6 +339,9 @@ the gateway can pass its TLS through (§6) instead of terminating it.
 Let's Encrypt allows 50 new certificates per registered domain per week. Until `nsl.sh`
 is on the PSL every user shares that bucket:
 
+- Phase 1 as shipped spends **two** orders per delegated user (box + gateway, same
+  names), so about 25 delegations per week; Phase 1.1 brings it back to one (the
+  gateway's single `*.<zone>` replaces the per-user ones).
 - DNS-01 wildcard: one order per user per renewal cycle. A fleet of a few hundred
   boxes fits if the first issuance is spread over a few weeks (stagger by a hash of
   the user id) and renewals are spread naturally.
