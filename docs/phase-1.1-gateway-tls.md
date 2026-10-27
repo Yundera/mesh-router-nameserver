@@ -301,13 +301,31 @@ Limits, to say as plainly in the UI:
   that nothing on the path (gateway, tunnel, DNS) can read the traffic, not that the
   vendor of the box software could not.
 
-CAA caveats to watch in the test:
+CAA as built (step 5, staging 2026-10-27):
 
-- a rebuilt box has a new ACME account: its first order is refused until it reports the
-  new account; Caddy's retry picks it up after the report;
-- Caddy's default issuers are Let's Encrypt **then ZeroSSL**: the CAA record must list
-  every issuer the box may use, or the box is pinned to Let's Encrypt;
-- **no CAA at `<zone>` before the cutoff**: it would also restrict Cloudflare's own edge
+- **Box (mesh-router-caddy zone watcher).** While the zone is delegated, the box reads the
+  Let's Encrypt account URIs in Caddy's storage (`acme[-staging]-v02…/users/*/*.json`,
+  status valid: one per email it ever used, plus the staging account Caddy creates for a
+  test issuance after a failure) and sends them to `PUT /dns/v1/caa/:userid/:sig`
+  (box signature, as acme-dns) when the list changes, and once a day. **Never an empty
+  list**: a rebuilt box with fresh storage would otherwise remove the CAA, and the
+  restriction with it, until its first order. Removing the CAA is deliberate (`[]`).
+- **Backend.** `dns.caaAccounts` on the user's `nsl-router` document (at most 4 Let's
+  Encrypt URIs, production or staging); the user zone gets
+  `<user>.<zone> CAA 0 issue|issuewild "letsencrypt.org; accounturi=<uri>"` per account,
+  TTL 300. No account = no CAA RRset. The apex CAA is managed like the A/NS/TXT sets.
+- **Issuers.** The DNS-01 policy (`tls { dns acmedns … }`) has one issuer, Let's Encrypt:
+  no ZeroSSL fallback for the zone, so the CAA names `letsencrypt.org` only. The sslip.io
+  names keep Caddy's defaults; they are outside the user zone.
+- **Rebuild, measured on wisera.** Accounts and zone certificates set aside, Caddy
+  restarted: new account, both orders refused (`urn:ietf:params:acme:error:caa`, CAA
+  record prevents issuance); the next watcher tick (≤ 120 s) reported the new account;
+  Caddy's retry obtained both certificates. 14:56:51 → 15:00:15 UTC, ~4 min including the
+  passthrough list catching up. On a real rebuild the box has no certificate then anyway.
+- **Not covered.** The record is Yundera's to rewrite (owner of the zone): a change is
+  public in DNS and logged (`[caa]` in the backend). A box still on mesh-router-caddy <
+  the CAA release reports nothing: no CAA, as before.
+- **No CAA at `<zone>` before the cutoff**: it would also restrict Cloudflare's own edge
   certificates for dash names. User zones are safe (Cloudflare never issues below one
   level).
 
@@ -329,7 +347,8 @@ CAA caveats to watch in the test:
 3. **Tunnel at the network layer** (§5), after the study.
 4. **SNI router + passthrough** (§3) with PROXY v2 to the box; then remove per-user
    gateway certificates and revoke wisera's.
-5. **CAA** on wisera (§7), including a rebuild-style account change.
+5. **CAA** on wisera (§7), including a rebuild-style account change. **Done on staging
+   2026-10-27.**
 6. Drop `*.<zone>` / `*.nip.io` from cert0.
 
 Prod follows step by step once staging holds; no prod user is delegated yet, so steps 1,
@@ -341,7 +360,6 @@ Prod follows step by step once staging holds; no prod user is delegated yet, so 
   gateway.
 - Caddy `proxy_protocol` wrapper options on 2.11.4 (allow list, fallback for direct
   clients).
-- Whether the box pins issuance to Let's Encrypt (simpler CAA) or lists ZeroSSL too.
 - Client IP on terminated connections (§3): OpenResty has no `stream_realip`. Harmless
   while dash names arrive through Cloudflare; must be solved before the cutoff (custom
   OpenResty build, or the split moved into Traefik).
