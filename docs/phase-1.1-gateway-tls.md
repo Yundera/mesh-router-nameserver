@@ -77,6 +77,23 @@ The gateway address list comes from the backend (`DNS_GATEWAY_IPS`), read by the
 mesh-router-caddy entrypoint like `dns.live`. To check: the wrapper's `allow` /
 `fallback_policy` options on the pinned Caddy 2.11.4.
 
+**Built 2026-10-27 (step 4), staging.** The gateway's TLS port is an OpenResty `stream`
+server (`sni_router.lua`); the HTTP TLS server moved to a local unix socket behind it.
+Passthrough needs a real user (the label resolves) and a TLS-capable route, so
+`gateway.entrypoint.<zone>` (the Worker's fallback host, two labels) and unknown names
+are terminated. OpenResty has no `stream_realip` module, so terminated connections
+reach the HTTP server without a client address (behind Cloudflare it was the edge's
+anyway): **to solve before the cutoff**, when dash names reach the gateway directly
+(custom OpenResty build with `stream_realip`, or the split moved into Traefik). The box's
+Caddy has no `trusted_proxies`, so apps behind the gateway already saw the gateway as
+client: passthrough without PROXY to the box loses nothing; PROXY to the box is a later
+improvement. Verified on wisera: through the gateway, its dot names and apex present the
+box's own certificates (same SHA-256 as a direct connection; before: the gateway's own
+per-user certificate), over the public IP and over the tunnel. Per-user issuance turned
+off on the staging backend (`GATEWAY_ACME_DIRECTORY` commented out), wisera's gateway
+certificate revoked (reason superseded) and deleted, `/gateway/certs` empty. The
+`GatewayCerts` / `certs.lua` / `certlist.lua` code stays until a cleanup release.
+
 ## 4. Gateway → box hop identity: `<label>.box.<zone>`
 
 On the terminated path the gateway re-encrypts to the box. Today it sends SNI
@@ -218,6 +235,15 @@ route and capability).
 
 ## 6. The gateway's own certificate: `*.<zone>`
 
+> **Deferred to the cutoff (decided 2026-10-27).** A `_acme-challenge.<zone>` CNAME in
+> Cloudflare would sit where Cloudflare's Universal SSL validates its own `*.<zone>` edge
+> certificate (TXT records it adds itself; a CNAME excludes other records at that name),
+> so the edge certificate every dash name depends on could fail to renew, silently, weeks
+> later. Before the cutoff the gateway's certificate only matters behind Cloudflare
+> ("Full (strict)"), and nothing else in 1.1 needs it. At the cutoff the zone is ours: the
+> backend writes `_acme-challenge.<zone>` TXT directly, no CNAME, no `acme.` zone. The
+> CNAME design below is kept for the record.
+
 One Let's Encrypt certificate for `*.<zone>`, issued by the backend by DNS-01 (it
 replaces the per-user `GatewayCerts` orders; the machinery stays). While Cloudflare still
 holds the zone, the challenge is delegated with one static record:
@@ -297,8 +323,7 @@ CAA caveats to watch in the test:
 
 ## 9. Order (staging first, wisera as test user)
 
-1. **Gateway `*.<zone>`** (§6), served as the gateway default instead of the self-signed
-   fallback; Cloudflare staging zone → Full (strict). Independent of the rest.
+1. **Gateway `*.<zone>`** (§6): **deferred to the cutoff**, TXT written in our own zone.
 2. **Hop identity, additive** (§4): SAN on cert0, gateway sends `<label>.box.<zone>` with
    mesh-CA-only trust.
 3. **Tunnel at the network layer** (§5), after the study.
@@ -312,9 +337,11 @@ Prod follows step by step once staging holds; no prod user is delegated yet, so 
 
 ## 10. Open questions
 
-- Tunnel internals (§5): routed WireGuard subnet or per-peer forwarding today.
 - Backend probe of NAT boxes: direct reach into the WireGuard subnet, or through a
   gateway.
 - Caddy `proxy_protocol` wrapper options on 2.11.4 (allow list, fallback for direct
   clients).
 - Whether the box pins issuance to Let's Encrypt (simpler CAA) or lists ZeroSSL too.
+- Client IP on terminated connections (§3): OpenResty has no `stream_realip`. Harmless
+  while dash names arrive through Cloudflare; must be solved before the cutoff (custom
+  OpenResty build, or the split moved into Traefik).
