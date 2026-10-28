@@ -133,8 +133,11 @@ it before delegation.
 ### 3.5 Static records
 
 Everything that is not a user or IP name (apex, verification TXT, mail records, NS
-glue, the backend's hostname) lives in a **versioned zone file in git**, reviewed like
-code. §9 has the inventory.
+glue, the backend's hostname) lives in a **static zone file**: server config, kept in
+each environment's config repo next to the backend compose and bind-mounted into it
+(`DNS_STATIC_ZONE_FILE`), never baked into an image. The backend reads it on every
+reconcile pass, adds the records it derives and writes the whole apex zone to the
+hidden primary (§10.2). §9 has the inventory.
 
 ## 4. The answer rule
 
@@ -376,7 +379,7 @@ gateway answer (default) ──► box obtains cert (DNS-01, or HTTP-01 through 
 
 Taken from public DNS on 2026-10-22. The zone has a **`*.nsl.sh` wildcard**, so public
 lookups cannot list every record: the complete inventory comes from a Cloudflare zone
-export, which becomes the first version of the git zone file.
+export, which becomes the first version of the static zone file (§3.5).
 
 | Name | Type | Value | Purpose | After the move |
 |---|---|---|---|---|
@@ -437,7 +440,7 @@ hidden primary: PowerDNS + SQLite, sidecar in the backend stack
   the published port is firewalled to them, and the secondaries accept NOTIFY only from
   the primary. Zone contents are public DNS data either way.
 - **The primary is disposable.** Every record it holds is derived from backend state
-  (Firestore, Redis, the zone file in git): a full reconcile (§10.3) rebuilds it from
+  (Firestore, Redis, the static zone file): a full reconcile (§10.3) rebuilds it from
   an empty volume. Once DNSSEC is on, the signing keys become the only state that
   must be backed up.
 - **New zones reach the secondaries by themselves**: the primary is a catalog-zone
@@ -458,7 +461,7 @@ network instead.
 | Zone | Primary | ns1 / ns2 |
 |---|---|---|
 | `<user>.<zone>`, one per delegated user (§13.1) | written by the backend | secondary |
-| `<zone>` itself (after the cutover, §13.3) | static file from git + user records | secondary |
+| `<zone>` itself (served from the first load, delegated at the cutover, §13.3) | static zone file + backend records (below) | secondary |
 | `ip.<zone>` | — | **local**: one wildcard `LUA` record from the image config |
 | `allow.<ip-zone>.invalid` (allowlist for `ip.<zone>`) | written by the backend | secondary |
 | catalog zone | producer | consumer |
@@ -472,6 +475,19 @@ A delegated user's zone holds a handful of records, all written by the backend:
 | `*.<user>.<zone>` | A | same as the apex | 30 |
 | `<host>.<user>.<zone>` | A | only for a host whose answer differs from the user's (per-host force) | 30 |
 | `_acme-challenge.<user>.<zone>` | TXT | 0–2 challenge values (§7.2) | 60 |
+
+The apex zone `<zone>` is the static zone file (§3.5) plus what the backend derives; the
+backend owns the whole zone and deletes a record that is in neither, so a hand edit on
+the primary does not survive a pass. In the file, the derived names are ignored (listed
+by `mesh-cli dns zone --dry-run`), and a file that does not parse changes nothing:
+
+| Name | Type | Value | TTL |
+|---|---|---|---|
+| `<zone>` | SOA, NS | PowerDNS SOA, `DNS_NS_HOSTS` | 3600 |
+| `*.<zone>` | A | the healthy gateways (`DNS_GATEWAY_IPS`) | 30 |
+| `ip.<zone>` | NS | `DNS_NS_HOSTS` (delegation of the local zone) | 3600 |
+| `<user>.<zone>` | NS | `DNS_NS_HOSTS`, for each delegated user (`mesh-cli dns delegate`) | 3600 |
+| everything else | any | the static zone file, `$TTL 300` by default (Cloudflare's "auto") | file |
 
 `ip.<zone>` is the one zone that can't be transferred: its names are unbounded. Each
 public node serves it from config, with no data to sync: a wildcard `LUA` record
@@ -615,7 +631,7 @@ Ships to prod with no change for any user who is not delegated. Staging test use
 | Naming | Reserved labels + no-dash rule at signup (§3.4); audit existing usernames | Signup-only |
 | Naming | Cookie check (AppShield gates host-only; Authelia already is) and PSL submission (in progress) | No change |
 | Nameserver | PowerDNS secondaries replace the stock sslip.io server on the public NS hosts: `ip.<zone>` from the LUA wildcard, compared answer for answer with the sslip.io server first; delegated user zones and challenge TXT by transfer from the hidden primary in the backend stack | `ip.<zone>` answers unchanged; user zones exist only for delegated users |
-| Nameserver | Static zone file in git from the Cloudflare export, checked in CI against live Cloudflare answers, not served | Not served |
+| Nameserver | Static zone file (server config, §3.5) from the Cloudflare export, loaded by the backend into the apex zone on the primary; `mesh-cli dns zone diff` compares it with live Cloudflare answers. Served by our nameservers, asked by nobody until the registrar switch | Not delegated |
 | Nameserver | Metrics, external DNS monitor (SOA serial of primary vs every secondary), shadow log in the backend of the answer each user would get | Observation only |
 | Backend | Hostnames in route registration (optional field), per-host state, probes, force overrides, acme-dns API, new `/resolve/v2` fields | Additive; old agents and gateways ignore them |
 | Box | Pinned xcaddy image with `caddy-dns/acmedns`; mesh-router-caddy itself asks the backend whether the zone is delegated (`dns.live`) and switches the root and `*.<domain>` to DNS-01 certificates (no `.env` flag, nothing set by Yundera; revised 2026-10-25); agent sends hostnames | Not delegated: the root keeps the gateway CA, the wildcard a local certificate, no ACME order |

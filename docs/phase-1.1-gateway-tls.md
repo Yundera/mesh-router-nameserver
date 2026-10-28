@@ -453,4 +453,4 @@ Prod follows step by step once staging holds; no prod user is delegated yet, so 
 - ~~Caddy `proxy_protocol` wrapper options on 2.11.4~~: `allow` + `fallback_policy ignore`
   (§3, 2026-10-28).
 - ~~Client IP on terminated connections (§3)~~: OpenResty rebuilt with `stream_realip`
-  (§3, 2026-10-28), staging test pending.
+  (§3, 2026-10-28): gateway 1.7.0 on staging 2026-10-28, prod pending.
