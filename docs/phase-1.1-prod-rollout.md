@@ -308,7 +308,7 @@ demostaging2 and followingcaterpillar 502 through the gateway until their renewa
 - Not in this rollout: client address on terminated connections (no `stream_realip`),
   the gateway's own `*.<zone>` certificate (cutoff), PROXY protocol towards the box.
 
-## C. Redis password (staging 2026-10-27, prod pending)
+## C. Redis password (staging and prod 2026-10-27)
 
 The backend's Redis had no password and sat on `webtraefik` as well as `mesh-internal`:
 any container on either network could read and write every user's routes. Tunnel 1.4.0
@@ -373,3 +373,9 @@ Then the holyhorse baseline from B.0. Route registrations resume within one agen
 nothing in Redis is lost (same volume, AOF).
 
 Rollback: restore both backups, `docker compose up -d`.
+
+Prod done 2026-10-27 ~18:35 UTC (user authorized): backend was already on 2.0.45; Redis
+on `mesh-internal` only, `--requirepass`, 7132 keys kept, `Redis connected` and route
+registrations within a minute, anonymous `PING` → `NOAUTH`, holyhorse direct / gateway /
+tunnel and yunderalabs / yunderateam through the gateway 302. Backups
+`docker-compose.yml.bak-2026-10-27-redispw`, `.env.bak-2026-10-27-redispw`.

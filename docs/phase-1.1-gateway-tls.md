@@ -72,10 +72,35 @@ serves `*.<zone>` (§6) and proxies to the box as today, with the hop identity o
 
 **Client IP on passthrough:** the gateway prepends PROXY v2 towards the box. The box's
 Caddy accepts it through the `proxy_protocol` listener wrapper, **only** from the gateway
-addresses (and the tunnel subnet); every other client is a plain direct connection.
-The gateway address list comes from the backend (`DNS_GATEWAY_IPS`), read by the
-mesh-router-caddy entrypoint like `dns.live`. To check: the wrapper's `allow` /
-`fallback_policy` options on the pinned Caddy 2.11.4.
+addresses and the tunnel relay; every other client is a plain direct connection.
+
+Decided 2026-10-28 (user), box side built the same day (unstaged):
+
+- **Caddy 2.11.4, tested** (`tmp-claude/caddy-pp-test/`): with `allow`, the header is
+  *optional* from an allowed source, whatever the policy; `fallback_policy` only decides
+  what a header from any other source does: `ignore` (chosen) parses and discards it
+  and keeps the socket address, `skip`/`reject` break the connection, `use` believes it.
+  `ignore` fails safe: a gateway missing from the list costs the client address, never
+  the connection. `ignore` is the JSON zero value, so the running config omits it.
+- **Allow list** = the backend's `DNS_GATEWAY_IPS` (published as `gatewayIps` in
+  `/router/api/version`; staging checked: the gateway's egress IP is that address) + the
+  tunnel container's address on `pcs` (the gateway's tunnel path arrives through its
+  relay), looked up by name at each tick. The same list is the server's
+  `trusted_proxies`, so terminated dash-form requests keep the X-Forwarded-For the
+  gateway sets; from anyone else X-Forwarded-For is replaced.
+- **Where:** mesh-router-caddy's entrypoint writes `/data/mesh-proxy.caddy` (a
+  `servers :443` block) and the Caddyfile's global options import it by **glob**
+  (`import /data/mesh-proxy*.caddy`): an image that does not write it yet only logs "No
+  files matching import glob pattern", where a plain import would make caddy-docker-proxy
+  drop the block.
+- **Rollout, per box:** the box reports `PUT /hop/v1/proxy-protocol/:userid/:sig
+  {enabled}` from its *running* config (admin API `listener_wrappers`), on change and every
+  30 min; the backend keeps it 2 h (`hop:proxy:<uid>`) and `/resolve/v2` says
+  `proxyProtocol: true`. The gateway sends the header only to such boxes, so no fleet-wide
+  wait, and a box rolled back to an older Caddy drops out within 2 h. Tested: new image +
+  old Caddyfile reports `false`; old image 1.4.3 + new Caddyfile serves normally.
+- **Gateway side waits for `stream_realip`** (below): without it, the header the gateway
+  would send carries Traefik's address, not the client's.
 
 **Built 2026-10-27 (step 4), staging.** The gateway's TLS port is an OpenResty `stream`
 server (`sni_router.lua`); the HTTP TLS server moved to a local unix socket behind it.
@@ -92,7 +117,8 @@ box's own certificates (same SHA-256 as a direct connection; before: the gateway
 per-user certificate), over the public IP and over the tunnel. Per-user issuance turned
 off on the staging backend (`GATEWAY_ACME_DIRECTORY` commented out), wisera's gateway
 certificate revoked (reason superseded) and deleted, `/gateway/certs` empty. The
-`GatewayCerts` / `certs.lua` / `certlist.lua` code stays until a cleanup release.
+`GatewayCerts` / `certs.lua` / `certlist.lua` code was removed in step 6 (backend 2.0.43,
+gateway 1.6.0); only the `acme-client` dependency stays, for the gateway's `*.<zone>` (§6).
 
 ## 4. Gateway → box hop identity: `<label>.box.<zone>`
 
@@ -209,8 +235,14 @@ Compatibility: an old box keeps the legacy HTTP path (the provider's nginx runs 
 the tunnel container, so the firewall does not touch it); an old gateway ignores
 `tunnelIp`. The provider security fix ships on its own first.
 
-Open: whether the backend probes NAT boxes over the same route (it would need the same
-route and capability).
+NAT boxes are probed **through the gateway** (decided 2026-10-28): a box with no public IP
+gets the same two handshakes against the first `DNS_GATEWAY_IPS` address, which passes
+the dot name and the apex through to the box over its tunnel; the state says
+`via: gateway` and keeps `publicIp: null`, so the answer rule still answers the gateway.
+It feeds `mesh-cli dns status` and the readiness check before a delegation; no route or
+capability in the backend. Checked on staging: from the backend container, wisera through
+151.115.96.14 shows its own Let's Encrypt certificates (same fingerprints as direct), a
+non-delegated box the mesh CA.
 
 ### Staging record (2026-10-27)
 
@@ -374,10 +406,9 @@ Prod follows step by step once staging holds; no prod user is delegated yet, so 
 
 ## 10. Open questions
 
-- Backend probe of NAT boxes: direct reach into the WireGuard subnet, or through a
-  gateway.
-- Caddy `proxy_protocol` wrapper options on 2.11.4 (allow list, fallback for direct
-  clients).
+- ~~Backend probe of NAT boxes~~: through the gateway (§5, 2026-10-28).
+- ~~Caddy `proxy_protocol` wrapper options on 2.11.4~~: `allow` + `fallback_policy ignore`
+  (§3, 2026-10-28).
 - Client IP on terminated connections (§3): OpenResty has no `stream_realip`. Harmless
   while dash names arrive through Cloudflare; must be solved before the cutoff (custom
   OpenResty build, or the split moved into Traefik).
