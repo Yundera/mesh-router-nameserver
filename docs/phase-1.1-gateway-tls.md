@@ -101,6 +101,46 @@ Decided 2026-10-28 (user), box side built the same day (unstaged):
   old Caddyfile reports `false`; old image 1.4.3 + new Caddyfile serves normally.
 - **Gateway side waits for `stream_realip`** (below): without it, the header the gateway
   would send carries Traefik's address, not the client's.
+- **Box Caddy `trusted_proxies_strict`** (caddy 1.4.5): the gateway *appends* the client to
+  X-Forwarded-For, and without strict Caddy takes the *leftmost* value from a trusted
+  proxy, which the client controls. Tested: `X-Forwarded-For: 6.6.6.6, 203.0.113.9` from a
+  trusted source gives `client_ip` 6.6.6.6 without strict, 203.0.113.9 with it.
+
+**Gateway side built 2026-10-28 (option A, user decision), local test only:** the image
+rebuilds nginx from the same OpenResty 1.29.2.5 sources and configure line with
+`--with-stream_realip_module` (43 s build; only the binary is copied, linked to the image's
+own OpenSSL 3.5.6 / PCRE2 / LuaJIT). The front trusts `GATEWAY_TLS_REALIP_FROM` (default
+the private ranges) and sends `proxy_protocol on` to everything; `proxy_protocol` is per
+server, not per connection, so a box without `proxyProtocol` goes through a strip relay
+(a second stream server on a unix socket, `listen … proxy_protocol`, same SNI decision)
+that ends the header. The HTTP TLS server listens with `proxy_protocol` and
+`real_ip_header proxy_protocol`. Rejected: parsing the PROXY header and ClientHello in Lua
+(two hand-written binary parsers, a different mode once the gateway is its own edge);
+moving the split into Traefik (naming rules in Traefik, passthrough still unsolved).
+Local harness (`tmp-claude/gateway-realip-test/`), "Traefik" sending PROXY for
+203.0.113.9: box with the report → `remote=203.0.113.9` on dot name and apex; box without
+→ unchanged (gateway address) through the relay; terminated → `X-Real-IP 203.0.113.9`,
+`X-Forwarded-For` appended after a client-supplied value; header from an untrusted source →
+its socket address.
+
+**Staging 2026-10-28** (nasselle gateway `mesh-router-gateway:realip-local`, backup
+`gateway/docker-compose.yml.bak-2026-10-28-realip`; wisera Caddy
+`mesh-router-caddy:1.4.5-strict-local` + template Caddyfile, backups
+`*.bak-2026-10-28-pp`, reverted by its 03:00 self-check to template main = caddy 1.4.4):
+wisera reported `proxyProtocol: true` ~80 s after the switch. A whoami app on wisera saw
+the client (88.187.147.189) on the dot name through the gateway (before: the gateway's
+151.115.96.14), `X-Real-Ip` = client on the dash name over the agent route and the routed
+tunnel (1.6.1 sent `unix:`), demostaging1/2 (no report) unchanged through the strip relay,
+0 errors in the gateway log.
+
+**X-Forwarded-For: append until the cutoff** (`GATEWAY_FORWARDED_FOR`, default `append`).
+Replacing it with the gateway's own view loses the client on every Cloudflare → gateway
+request (forced gateway, all NAT boxes): the Worker puts the client in X-Forwarded-For, and
+the gateway sees only the Cloudflare edge. Appending keeps that, at the price of a
+client-chosen leftmost value on requests that reach the gateway directly (today only by
+`--resolve`). The box's Caddy is unaffected either way (`trusted_proxies_strict`).
+**Cutoff runbook: set `GATEWAY_FORWARDED_FOR=replace`** once no request comes through
+Cloudflare.
 
 **Built 2026-10-27 (step 4), staging.** The gateway's TLS port is an OpenResty `stream`
 server (`sni_router.lua`); the HTTP TLS server moved to a local unix socket behind it.
@@ -412,6 +452,5 @@ Prod follows step by step once staging holds; no prod user is delegated yet, so 
 - ~~Backend probe of NAT boxes~~: through the gateway (§5, 2026-10-28).
 - ~~Caddy `proxy_protocol` wrapper options on 2.11.4~~: `allow` + `fallback_policy ignore`
   (§3, 2026-10-28).
-- Client IP on terminated connections (§3): OpenResty has no `stream_realip`. Harmless
-  while dash names arrive through Cloudflare; must be solved before the cutoff (custom
-  OpenResty build, or the split moved into Traefik).
+- ~~Client IP on terminated connections (§3)~~: OpenResty rebuilt with `stream_realip`
+  (§3, 2026-10-28), staging test pending.
