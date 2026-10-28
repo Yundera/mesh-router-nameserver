@@ -653,7 +653,8 @@ static zone file in sync; then the same on prod with pilot users.
 2. **Batch delegation**: delegate users in batches (scripted Cloudflare API calls,
    reversible per user). Dot form becomes the name shown in the UI.
 3. **Cutoff**: SendGrid records verified on our nameserver, static zone served,
-   registrar NS switch, Worker retired. Rehearsed on `inojob.com` first.
+   registrar NS switch, Worker retired. Rehearsed on `inojob.com` first. Gates and
+   steps: [`cutoff-runbook.md`](cutoff-runbook.md).
 
 ## 14. What changed from the June 2026 design
 
