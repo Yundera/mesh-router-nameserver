@@ -226,7 +226,7 @@ Design and staging record: [`phase-1.1-gateway-tls.md`](phase-1.1-gateway-tls.md
 - Visible to users: nothing until a prod user is delegated (passthrough and CAA only
   concern delegated zones; cert0 keeps working for every path through gateway 1.5).
 
-## B. Gateway 1.6.1: mesh CA only on the hop (pending)
+## B. Gateway 1.6.1: mesh CA only on the hop (prod 2026-10-28)
 
 1.6.x connects to every box with SNI `<label>.box.<zone>` and trusts the mesh CA only. A
 box whose cert0 predates backend 2.0.40 (no hop name) gets a **502** through the gateway
@@ -236,7 +236,8 @@ latest (backend 2.0.40 reached prod 2026-10-27 ~13:30); most do by 2026-10-29.
 
 ### B.0 Readiness (read-only)
 
-`mesh-cli dns hops` needs backend **2.0.44** or later (deploy it first; harmless).
+`mesh-cli dns hops` needs backend **2.0.44** to **2.0.46**; 2.0.47 removed it with the
+`cert:hop:*` keys it reads (B.2).
 
 ```bash
 cd /workspace/config/mesh-router-nsl/backend
@@ -298,13 +299,27 @@ look at its agent.
 
 Rollback: `cp docker-compose.yml.bak-2026-10-30-161 docker-compose.yml && docker compose up -d`.
 
+Prod done 2026-10-28 (user authorized; ahead of the 10-30 date, the readiness
+gate being met): 1.5.0 → 1.6.1 with `dns hops` at 29/30. The one box missing, `liness`
+(`rUGCPKVOAfS25N642d66UKQe6lD2`), is a non-Yundera box on `82-65-253-111.nip.io` with no
+`IP_ZONE`, set aside by the owner: it 502s through the gateway, a misconfiguration to
+report, not a reason to hold the rollout. Baseline unchanged (holyhorse direct / gateway /
+tunnel, yunderalabs and yunderateam 302 through the gateway); `certificate does not match`
+count 0 right after the deploy and again later. Backup
+`gateway/docker-compose.yml.bak-2026-10-28-161` (not `-10-30-`).
+
 ### B.2 After 1.6.1 holds on staging and prod
 
 Staging runs 1.6.1 since 2026-10-27 (deployed before `dns hops` was ready, on request:
 demostaging2 and followingcaterpillar 502 through the gateway until their renewal).
 
-- Backend: `hopName` in `/resolve/v2` and the `cert:hop:*` keys are only read by gateway
-  1.5 and by `mesh-cli dns hops`; they can go in a later release.
+- Backend **2.0.47**: `hopName` out of `/resolve/v2`, no more `cert:hop:*` keys, `mesh-cli
+  dns hops` removed (only gateway 1.5 and that command read them). cert0 keeps the
+  `<label>.box.<zone>` SAN, which 1.6 verifies. Existing `cert:hop:*` keys expire with
+  their certificate (72 h at most); nothing to delete. Staging 2026-10-28: `/resolve/v2`
+  without `hopName`, demostaging2 and followingcaterpillar 302 through the gateway.
+  Prod: pending (`backend/docker-compose.yml.bak-2026-10-28-2047`, same `sed` on
+  `mesh-router-backend:2.0.x`).
 - Not in this rollout: client address on terminated connections (no `stream_realip`),
   the gateway's own `*.<zone>` certificate (cutoff), PROXY protocol towards the box.
 
@@ -365,7 +380,7 @@ until curl -sf -o /dev/null https://nsl.sh/router/api/resolve/v2/holyhorse; do s
 docker compose logs --since 2m 2>&1 | grep -i "redis connected\|NOAUTH\|WRONGPASS"
 #   Redis connected, no NOAUTH/WRONGPASS
 docker exec $(docker ps -qf name=redis-nsl) redis-cli ping      # NOAUTH Authentication required.
-docker compose exec -T mesh-router-backend-nsl mesh-cli dns hops | head -1   # 2.0.44+
+docker compose exec -T mesh-router-backend-nsl mesh-cli dns allow | head -1   # mesh-cli reaches Redis
 curl -s -o /dev/null -w "dns health %{http_code}\n" https://nsl.sh/router/api/dns/health
 ```
 

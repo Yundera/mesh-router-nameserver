@@ -156,7 +156,8 @@ SNI for agent and tunnel routes, falling back to the previous SNI otherwise. cer
 72 h and the agent renews it at 36 h, so every live box carries the name within 36 h of
 the backend deploy. Verified on wisera after a forced re-issue: Caddy serves cert0 for the
 hop name, a capture of the gateway's handshakes shows only `wisera.box.inojob.com`, agent
-and routed tunnel paths answer.
+and routed tunnel paths answer. *Since backend 2.0.47 (2026-10-28) the record and
+`hopName` are gone: gateway 1.6+ always sends the hop name, so only the SAN remains.*
 
 **Mesh-CA-only trust is deferred to step 6.** nginx takes one
 `proxy_ssl_trusted_certificate` per location, and while some boxes are still reached
@@ -400,6 +401,8 @@ Step 6 rollout order (each environment):
    side gateway against demostaging2). cert0 lives 72 h and renews at 36 h: wait until
    `cert:hop:*` covers every user with routes (`routes:<uid>:*` in Redis), at the latest
    72 h after the backend that adds the SAN (2.0.40: 2026-10-27 on both environments).
+   Done: staging 2026-10-27, prod 2026-10-28 (29/30, the one box left a nip.io box with
+   no `IP_ZONE`). Backend 2.0.47 then dropped `cert:hop:*`, `hopName` and `dns hops`.
 
 Prod follows step by step once staging holds; no prod user is delegated yet, so steps 1,
 2 and 4 change nothing visible there until the first pilot.
