@@ -318,8 +318,12 @@ demostaging2 and followingcaterpillar 502 through the gateway until their renewa
   `<label>.box.<zone>` SAN, which 1.6 verifies. Existing `cert:hop:*` keys expire with
   their certificate (72 h at most); nothing to delete. Staging 2026-10-28: `/resolve/v2`
   without `hopName`, demostaging2 and followingcaterpillar 302 through the gateway.
-  Prod: pending (`backend/docker-compose.yml.bak-2026-10-28-2047`, same `sed` on
-  `mesh-router-backend:2.0.x`).
+  Prod 2026-10-28: `Redis connected`, `dns/health` 200, `/resolve/v2` without `hopName`,
+  holyhorse direct / gateway / tunnel unchanged. Every yunderateam name answered **404**
+  from the Worker (no `x-mesh-route`) for a few minutes after the restart while the box
+  answered 302 on its IP; it recovered on its own, likely the Worker's 60 s edge cache
+  of a resolve that failed during the restart. Backup
+  `backend/docker-compose.yml.bak-2026-10-28-2047`.
 - Not in this rollout: client address on terminated connections (no `stream_realip`),
   the gateway's own `*.<zone>` certificate (cutoff), PROXY protocol towards the box.
 
