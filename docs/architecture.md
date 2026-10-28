@@ -570,7 +570,7 @@ extension; it needs the same probe on v6.
 
 | Failure | Behaviour |
 |---|---|
-| Backend or hidden primary down | Zone frozen at its last state; secondaries keep answering until SOA expire (2 weeks). No flips, no new challenges. Gateway serves its cached routes. |
+| Backend or hidden primary down | Zone frozen at its last state; secondaries keep answering until SOA expire (2 weeks). No flips, no new challenges. Gateways serve their last resolution for 24 h (serve-stale, [`multi-gateway.md`](multi-gateway.md)). |
 | Primary volume lost | Recreated empty; the backend's full reconcile rewrites every zone, the secondaries pull the result. |
 | Backend down, box changes IP | Its new `<app>-<ip>.ip.<zone>` names answer empty until the backend is back (allowlist frozen). The old IP stays allowed. |
 | Box offline | Route expires → gateway → gateway shows the offline/landing page. |
@@ -578,7 +578,7 @@ extension; it needs the same probe on v6.
 | Cert about to expire | Downgraded to gateway before `notAfter` (margin), back up once renewed. |
 | One public nameserver down | The other answers; the returning one catches up by IXFR. |
 | Both nameservers down | Everything under the zone fails, apex and mail included. This is why §10.4 is a hard requirement. |
-| One gateway down | Clients retry the second `A`; remove it from the answer when its health check fails. |
+| One gateway down | Clients retry the second `A`; the backend drops it from the answer after two failed checks ([`multi-gateway.md`](multi-gateway.md)). |
 | Gateway flooded | Direct boxes are unaffected; gateway-routed names degrade. |
 | Stolen box credential | Can publish TXT for that one user (and already could register its routes). Revoke via `pcs revoke` / key rotation. |
 
