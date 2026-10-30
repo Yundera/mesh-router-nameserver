@@ -44,7 +44,7 @@ hidden primary  (ROLE=primary, sidecar in the backend stack, in no NS record)
 |---|---|---|
 | catalog (`catalog.<zone>.invalid`) | producer | consumer |
 | `allow.<ip-zone>.invalid` | written by the backend | transferred |
-| `<user>.<zone>`, delegated users | written by the backend | transferred |
+| `<user>.<zone>`, one per box (dormant until delegated, then live) | written by the backend | transferred |
 | `ip.<zone>` | — | local Lua wildcard, built from env |
 
 Design and rationale: [`docs/architecture.md`](docs/architecture.md). IP-encoded names
@@ -109,8 +109,9 @@ The secondary's address on it goes into `DNS_SECONDARY_IPS`.
 it on every build.
 
 In the parent zone, each public name needs an `A` record (not proxied), plus
-`NS ip.<zone>` (and `NS <user>.<zone>` for each delegated user) listing every one of
-them.
+`NS ip.<zone>` listing every one of them. A user moves to our nameservers with one more
+record there, `NS <user>.<zone>` (one of them is enough): its zone already exists, and
+the backend turns it live by itself.
 
 ## Checking a node
 

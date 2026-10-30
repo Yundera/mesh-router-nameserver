@@ -40,7 +40,7 @@ on `.sh`, up to two days on `.com`. Nothing is deleted on our side before §3 is
 | G4 | **Gateway ≥ 1.7.0** (`stream_realip`, client address on terminated connections) | `docker ps` image tag |
 | G5 | **Traefik holds a trusted certificate for the apex** | §1.1, then `curl --resolve <zone>:443:<host ip> https://<zone>/router/api/available/x` with no `-k` |
 | G6 | **Gateway holds a trusted `*.<zone>`** (deferred item, `phase-1.1-gateway-tls.md` §6) | `curl --resolve <app>-<user>.<zone>:443:<gw ip> https://…` with no `-k`, through each gateway |
-| G7 | **Every active user delegated** (`dns.delegated`), boxes on a mesh-router-caddy with `caddy-dns/acmedns` | see §0.1 |
+| G7 | **Every active box has a user zone** (automatic since 2026-10-30: dormant on its first registration), boxes on a mesh-router-caddy with `caddy-dns/acmedns` | see §0.1 |
 | G8 | **Inbound mail decided** (open point 3); MX, SPF, `cf2024-1` DKIM and DMARC `rua` lines of the zone file rewritten accordingly | read the file; `dns zone --dry-run` |
 | G9 | **≥ 2 gateways** in `DNS_GATEWAY_IPS`, on separate hosts (`architecture.md` §6, `multi-gateway.md`) | prod has one today |
 | G10 | **Glue registered** at the registrar: host objects for both NS names with their IPv4 (they sit inside the zone) | registrar UI; after §2: `dig +norec NS <zone> @<registry ns>` lists them with glue in ADDITIONAL |
@@ -55,17 +55,23 @@ through the passthrough, and the box presents its gateway-CA certificate: the us
 breaks (it works today through Cloudflare's edge certificate and the Worker). Dash
 names keep working (the gateway terminates them).
 
-Two ways to meet the gate:
+Every box that registered routes since the auto-zone backend (the release after 2.0.50) has a (dormant) zone, and our apex
+zone already carries `<user> NS` for each of them, so nothing has to be done per user:
 
-- **Phase 2 first** (`architecture.md` §13.3): users delegated in batches while
-  Cloudflare holds the zone (one Cloudflare NS record per user). Each box gets its
-  DNS-01 wildcard before the switch; the switch changes nothing for it.
-- **All at once at the switch**: `mesh-cli dns delegate <user> on` for every user just
-  before §2, which only adds `<user> NS` to *our* apex zone (no Cloudflare record).
-  After the switch the public resolvers see the delegations, the backend's live check
-  (1.1.1.1 and 8.8.8.8, refreshed every 10 min) flips, and each box orders its
-  certificates. Until it has them (minutes, more if Let's Encrypt is slow) its apex and
-  dot names fail the TLS handshake. Fewer steps, one visible window.
+- **Before the switch, optionally** (`architecture.md` §13.3): Cloudflare NS records for
+  users in batches. Each such box goes live and gets its DNS-01 wildcard before the
+  switch; the switch changes nothing for it.
+- **At the switch** for everyone else: the public resolvers see our apex's delegations,
+  the backend's live check (1.1.1.1 and 8.8.8.8, every 10 min per user) flips each user
+  live, and each box orders its certificates. Until it has them its apex and dot names
+  fail the TLS handshake (dash names are unaffected). One visible window, no step.
+- **Let's Encrypt limit**: every box orders at once, against one registered domain
+  (≈50 new certificates per week until the zone is on the Public Suffix List). With more
+  boxes than that, either the PSL entry lands first, or most users are moved by
+  Cloudflare batches over the preceding weeks.
+
+Check before §2: `mesh-cli dns zone --dry-run` lists a `<user> NS` per user zone;
+`mesh-cli dns sync --prune --dry-run` reports no orphan.
 
 Boxes whose mesh-router-caddy lacks `caddy-dns/acmedns` (FOSS boxes off the template
 channels) never get a certificate either way: list them in §1 and accept, or update
@@ -149,8 +155,8 @@ it as DNS: the apex, a dash name, a delegated user's apex and dot names, holyhor
 ## 2. Switch day
 
 1. Re-run §1.2. Re-check G11 (`dig +norec DS <zone> @<registry ns>`).
-2. If G7 is met "all at once": `mesh-cli dns delegate <user> on` for each user, wait one
-   reconcile pass (60 s), check `dig NS <user>.<zone> @<ns1 ip>`.
+2. Spot-check a few users that are not live yet: `dig NS <user>.<zone> @<ns1 ip>` answers
+   our NS (the apex delegation), `dig SOA <user>.<zone> @<ns1 ip>` answers (the zone).
 3. **Registrar: set the NS to our two names** (staging: Namecheap › Domain › Nameservers
    › Custom DNS; the glue of G10 must already exist).
 4. Watch the registry, then the public resolvers:
@@ -166,8 +172,9 @@ it as DNS: the apex, a dash name, a delegated user's apex and dot names, holyhor
    - `curl -s https://<zone>/router/api/available/x` (no `-k`);
    - a dash name, through each gateway, with `X-Mesh-Trace: 1`: no `cf-worker` segment
      any more;
-   - delegated users: `mesh-cli dns status <user>` shows live, and the box's Caddy log
-     shows the DNS-01 orders;
+   - users: within ~10 min `mesh-cli dns status <user>` shows live (or
+     `mesh-cli dns sync <user>` to check now), and the box's Caddy log shows the DNS-01
+     orders;
    - an agent and a tunnel box re-register (backend log), `ip.<zone>` still answers.
 6. **CAA at the apex**, now that Cloudflare no longer issues for the zone (Traefik and the
    gateway use Let's Encrypt; user zones carry their own CAA):

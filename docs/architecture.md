@@ -4,8 +4,9 @@
 > stock PowerDNS everywhere, the backend writes to a hidden primary, the public
 > nameservers are zone-transfer secondaries. Built so far: the topology (§10), the
 > gated `ip.<zone>` ([`ip-names.md`](ip-names.md)), per-user zone delegation with
-> DNS-01 and gateway certificates (Phase 1, §13.2). Staging has a delegated user
-> (wisera); prod runs the same stack with none delegated yet. It
+> DNS-01 and gateway certificates (Phase 1, §13.2); since 2026-10-30 every box gets a
+> dormant zone and goes live by itself once the parent delegates it (§10.3). Staging has
+> a delegated user (wisera); prod runs the same stack with none delegated yet. It
 > replaces the June 2026 design (per-user `dnsDirect` flag, Cloudflare kept in front);
 > §14 records what changed and why.
 
@@ -460,13 +461,15 @@ network instead.
 
 | Zone | Primary | ns1 / ns2 |
 |---|---|---|
-| `<user>.<zone>`, one per delegated user (§13.1) | written by the backend | secondary |
+| `<user>.<zone>`, one per box: dormant until delegated, then live (§10.3, §13.1) | written by the backend | secondary |
 | `<zone>` itself (served from the first load, delegated at the cutover, §13.3) | static zone file + backend records (below) | secondary |
 | `ip.<zone>` | — | **local**: one wildcard `LUA` record from the image config |
 | `allow.<ip-zone>.invalid` (allowlist for `ip.<zone>`) | written by the backend | secondary |
 | catalog zone | producer | consumer |
 
-A delegated user's zone holds a handful of records, all written by the backend:
+A user zone holds a handful of records, all written by the backend. A **dormant** zone (the
+parent does not delegate it yet) holds only the SOA, NS and the apex and `*` A records
+pointing at `DNS_GATEWAY_IPS`; a **live** one holds all of these:
 
 | Name | Type | Value | TTL |
 |---|---|---|---|
@@ -486,7 +489,7 @@ by `mesh-cli dns zone --dry-run`), and a file that does not parse changes nothin
 | `<zone>` | SOA, NS | PowerDNS SOA, `DNS_NS_HOSTS` | 3600 |
 | `*.<zone>` | A | the healthy gateways (`DNS_GATEWAY_IPS`) | 30 |
 | `ip.<zone>` | NS | `DNS_NS_HOSTS` (delegation of the local zone) | 3600 |
-| `<user>.<zone>` | NS | `DNS_NS_HOSTS`, for each delegated user (`mesh-cli dns delegate`) | 3600 |
+| `<user>.<zone>` | NS | `DNS_NS_HOSTS`, for every user zone on the primary (dormant or live) | 3600 |
 | everything else | any | the static zone file, `$TTL 300` by default (Cloudflare's "auto") | file |
 
 `ip.<zone>` is the one zone that can't be transferred: its names are unbounded. Each
@@ -516,15 +519,26 @@ default 1000 fails 86 queries).
 
 The dynamic part of the design is a backend service, not a DNS server feature:
 
-- **Desired state** per delegated user = §4.2 answer from Firestore (`dns` block),
+- **Every box gets a zone, nothing is set by hand.** A box's first route registration
+  creates its zone **dormant**: fixed content (NS + the gateways), written once, never
+  probed, not in the full pass. It is rewritten only when `DNS_NS_HOSTS` or
+  `DNS_GATEWAY_IPS` change (once, at the next backend start), and deleted when the domain
+  is released or renamed (`mesh-cli dns sync --prune` catches what was missed).
+- **Live = observed.** On a registration (at most every 10 min per user) and in the full
+  pass (live users), the backend asks 1.1.1.1 and 8.8.8.8 for `NS <user>.<zone>`. One of
+  our `DNS_NS_HOSTS` in the answer = the parent delegates the name to us: `dns.live` is
+  written in Firestore (on transitions only) and the zone switches to the §4.2 answer.
+  No delegation for 3 checks in a row turns it back to dormant; no conclusive answer
+  keeps the state. The NS record in the parent is the only switch: a Cloudflare record
+  before the cutoff, our own apex zone after it.
+- **Desired state** per live user = §4.2 answer from Firestore (`dns` block),
   Redis (probe state, route freshness) and the challenge store.
-- **Event-driven write**: a probe result, a force change, a TXT update, a
-  delegation or route expiry recomputes that user and `PATCH`es only the RRsets that
+- **Event-driven write**: a probe result, a force change, a TXT update, a live
+  transition or route expiry recomputes that user and `PATCH`es only the RRsets that
   differ. Nothing changed → no write → no serial bump.
-- **Periodic full pass** (every minute over delegated users; cheap: one GET per
-  zone) repairs drift and catches route expiry, which has no event.
-- **Delegation on/off** creates/deletes the zone on the primary (with its catalog
-  membership); the secondaries follow.
+- **Periodic full pass** (every minute over live users only; cheap: one GET per
+  zone) repairs drift and catches route expiry, which has no event. Its Firestore read is
+  one indexed query (`dns.live == true`) every 10 minutes, whatever the fleet size.
 - **The `ip.<zone>` allowlist**: the public IPs of agent routes (`source: agent`,
   signature-verified, `isLanOrReserved` filtered) of every registered user, kept for a
   grace period after the last registration (`DNS_ALLOW_GRACE_SECONDS`, default 6 h: short
@@ -587,7 +601,7 @@ extension; it needs the same probe on v6.
 | Failure | Behaviour |
 |---|---|
 | Backend or hidden primary down | Zone frozen at its last state; secondaries keep answering until SOA expire (2 weeks). No flips, no new challenges. Gateways serve their last resolution for 24 h (serve-stale, [`multi-gateway.md`](multi-gateway.md)). |
-| Primary volume lost | Recreated empty; the backend's full reconcile rewrites every zone, the secondaries pull the result. |
+| Primary volume lost | Recreated empty; the full pass rewrites the live zones at once, each dormant zone comes back on its box's first registration after its Redis marker expires (≤ 24 h); the secondaries pull the result. |
 | Backend down, box changes IP | Its new `<app>-<ip>.ip.<zone>` names answer empty until the backend is back (allowlist frozen). The old IP stays allowed. |
 | Box offline | Route expires → gateway → gateway shows the offline/landing page. |
 | Cert issuance fails | Stays gateway. Invisible to the user; visible in the dashboard `reason`. |
@@ -602,11 +616,17 @@ extension; it needs the same probe on v6.
 
 ### 13.1 The bridge: delegating one user at a time
 
-Cloudflare can keep the zone while single users move to the new design. One record per
-nameserver in Cloudflare, `<user>.<zone> NS ns1/ns2`, hands everything **under** that
-user to our nameserver: the user apex, `*.<user>.<zone>` and
-`_acme-challenge.<user>.<zone>`. A specific record wins over the `*.<zone>` wildcard,
-so nobody else is affected.
+Cloudflare can keep the zone while single users move to the new design. One NS record in
+Cloudflare, `<user>.<zone> NS <one of DNS_NS_HOSTS>` (one is enough, both is better),
+hands everything **under** that user to our nameserver: the user apex,
+`*.<user>.<zone>` and `_acme-challenge.<user>.<zone>`. A specific record wins over the
+`*.<zone>` wildcard, so nobody else is affected.
+
+That record is the only step. The zone is already on our nameservers (dormant, created
+on the box's first registration), so adding it never breaks the names, and the backend
+turns the user live by itself within ~10 minutes (§10.3); the box's Caddy then orders its
+DNS-01 certificates. Removing it turns the user dormant again after ~30 minutes. No
+`mesh-cli` step either way (`mesh-cli dns sync <user>` checks now instead of waiting).
 
 For a delegated user:
 
@@ -614,7 +634,8 @@ For a delegated user:
   nameserver, DNS-01 wildcard, direct answer or the new gateway;
 - **dash form** (`immich-john.nsl.sh`) is a sibling of `john.nsl.sh`, not under it, so
   it stays on Cloudflare and the Worker, unchanged. Both forms work side by side;
-- **rollback** is deleting the NS records; the lag is their TTL (300 s).
+- **rollback** is deleting the NS record(s); the lag is their TTL (300 s) plus the
+  backend's three checks before the box drops its DNS-01 certificates.
 
 Each phase is done on **staging (`inojob.com`) first**, and on prod only once
 confirmed there. Cloudflare's record quota is not a concern (under 1000 records with
@@ -630,7 +651,7 @@ Ships to prod with no change for any user who is not delegated. Staging test use
 | Naming | Dot form rendered **alongside** the dash form on every box, for store apps and platform stacks (Dex and Authelia dash-form only: their issuer URLs); the dash form stays the primary (Maison's default domain). Auth registrar accepts dot-form redirect hosts (revised 2026-10-25) | No certificate is ordered for a dot name: the box's static `*.<domain>` site covers them, with a local certificate until the zone is delegated. On a non-delegated box the dot names resolve to Cloudflare, whose edge certificate covers one level only, so nothing reaches the box by them |
 | Naming | Reserved labels + no-dash rule at signup (§3.4); audit existing usernames | Signup-only |
 | Naming | Cookie check (AppShield gates host-only; Authelia already is) and PSL submission (in progress) | No change |
-| Nameserver | PowerDNS secondaries replace the stock sslip.io server on the public NS hosts: `ip.<zone>` from the LUA wildcard, compared answer for answer with the sslip.io server first; delegated user zones and challenge TXT by transfer from the hidden primary in the backend stack | `ip.<zone>` answers unchanged; user zones exist only for delegated users |
+| Nameserver | PowerDNS secondaries replace the stock sslip.io server on the public NS hosts: `ip.<zone>` from the LUA wildcard, compared answer for answer with the sslip.io server first; user zones (dormant per box, live once delegated) and challenge TXT by transfer from the hidden primary in the backend stack | `ip.<zone>` answers unchanged; a dormant zone is asked by nobody until its NS record exists |
 | Nameserver | Static zone file (server config, §3.5) from the Cloudflare export, loaded by the backend into the apex zone on the primary; `mesh-cli dns zone diff` compares it with live Cloudflare answers. Served by our nameservers, asked by nobody until the registrar switch | Not delegated |
 | Nameserver | Metrics, external DNS monitor (SOA serial of primary vs every secondary), shadow log in the backend of the answer each user would get | Observation only |
 | Backend | Hostnames in route registration (optional field), per-host state, probes, force overrides, acme-dns API, new `/resolve/v2` fields | Additive; old agents and gateways ignore them |
@@ -650,10 +671,12 @@ static zone file in sync; then the same on prod with pilot users.
 
 ### 13.3 Later phases
 
-2. **Batch delegation**: delegate users in batches (scripted Cloudflare API calls,
-   reversible per user). Dot form becomes the name shown in the UI.
+2. **Batch delegation** (optional): Cloudflare NS records for users in batches (scripted
+   API calls, reversible per user), nothing on our side. Dot form becomes the name shown
+   in the UI.
 3. **Cutoff**: SendGrid records verified on our nameserver, static zone served,
-   registrar NS switch, Worker retired. Rehearsed on `inojob.com` first. Gates and
+   registrar NS switch, Worker retired. Our apex already carries `<user> NS` for every
+   user zone, so every box goes live with the switch, with no step per user. Rehearsed on `inojob.com` first. Gates and
    steps: [`cutoff-runbook.md`](cutoff-runbook.md).
 
 ## 14. What changed from the June 2026 design
