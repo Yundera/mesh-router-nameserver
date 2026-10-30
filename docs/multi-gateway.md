@@ -132,7 +132,7 @@ A gateway host runs a gateway and a tunnel provider side by side (nss1 on stagin
   address on the shared network, `TUNNEL_FORWARD_FROM` = the gateway's address.
 - **Gateway:** edge on 80/443, `BACKEND_URL` = the backend's public https URL,
   `GATEWAY_TLS_PORT=443`, `GATEWAY_FORWARDED_FOR=replace`, `TUNNEL_SUBNET` = the provider's
-  range, `TUNNEL_VIA` = the provider's address, `NET_ADMIN`, `USAGE_INGEST_URL=""`.
+  range, `TUNNEL_VIA` = the provider's address, `NET_ADMIN`.
 
 Order:
 
@@ -159,6 +159,7 @@ Order:
 - **Gateway start needs the backend:** the entrypoint fetches the mesh CA (60 s of
   retries, then exit). A restart keeps the previous file; a *recreate* during a backend
   outage fails. Fix: keep the CA on a volume.
-- **Usage (DAU) ingest** from gateway 2: out of scope for now (`USAGE_INGEST_URL=""`).
+- **Usage (DAU):** nothing to do on a gateway any more: the boxes report it themselves
+  (mesh-router-agent, `POST /usage/:userid/:sig`).
 - **Fleet:** boxes act on `tunnelProviders` only with the new requester (tunnel image
   bump + template pin); wisera runs it by hand until the 03:00 self-check reverts it.
