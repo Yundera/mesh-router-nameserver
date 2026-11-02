@@ -37,7 +37,7 @@ on `.sh`, up to two days on `.com`. Nothing is deleted on our side before §3 is
 | G1 | **Backend ≥ 2.0.49** with the zone file mounted (`./zone:/app/config/zone:ro`, `DNS_STATIC_ZONE_FILE`) | `docker exec <backend> mesh-cli dns zone --dry-run`: no change, nothing unexpected skipped |
 | G2 | **Static zone matches Cloudflare** | `mesh-cli dns zone diff`: every static record "same"; the only differences are the NS set, proxied names (Cloudflare addresses), `ip` and delegated users (referrals) |
 | G3 | **Every public NS serves the same zone** | §1 query loop: same SOA serial on each NS |
-| G4 | **Gateway ≥ 1.7.0** (`stream_realip`, client address on terminated connections) | `docker ps` image tag |
+| G4 | **Gateway ≥ 1.7.0** (`stream_realip`, client address on terminated connections) | `docker ps` image tag. Prod on 1.9.0 (2026-11-02): met by version; a client-address check through the gateway is still to do |
 | G5 | **Traefik holds a trusted certificate for the apex** | §1.1, then `curl --resolve <zone>:443:<host ip> https://<zone>/router/api/available/x` with no `-k` |
 | G6 | **Gateway holds a trusted `*.<zone>`** (deferred item, `phase-1.1-gateway-tls.md` §6) | `curl --resolve <app>-<user>.<zone>:443:<gw ip> https://…` with no `-k`, through each gateway |
 | G7 | **Every active box has a user zone** (automatic since 2026-10-30: dormant on its first registration), boxes on a mesh-router-caddy with `caddy-dns/acmedns` | see §0.1 |
