@@ -14,7 +14,8 @@ provider) leaves every gateway-routed name working.
 | Topic | Decision |
 |---|---|
 | DNS | A gateway answer lists the healthy gateways (`DNS_GATEWAY_IPS`, two `A`, TTL 30). The backend health-checks them and drops a dead one; none healthy = all listed. |
-| NAT box answer | A NAT box is answered only by the gateways that can reach it: those whose tunnel subnet holds one of its `tunnelIp`s and whose local provider is up (`DNS_GATEWAY_TUNNELS`, option A of 2026-10-28; gateway-to-gateway forwarding was set aside). |
+| NAT box answer | A NAT box is answered only by the gateways that can reach it: those whose tunnel subnet holds one of its `tunnelIp`s and whose local provider is up (`DNS_GATEWAY_TUNNELS`, option A of 2026-10-28; gateway-to-gateway forwarding was set aside). Only in a **live** user zone: dash names and dormant zones get every healthy gateway, hence the handoff below (2026-11-03). |
+| Handoff | A gateway that cannot reach a NAT box hands the request to the gateway that can: directly when it has no route of its own, or as a retry when its own tunnel fails to connect. HTTPS between gateways, verified by the mesh CA against a per-gateway certificate (decided 2026-11-03, #947; option (a) + retry, mesh CA certificates). |
 | Backend down | Each gateway keeps the last resolution (serve-stale, 24 h) and uses it while the backend cannot answer. Gateway 2 therefore outlives the backend's host for every name it has served recently. |
 | NAT boxes | A **tunnel provider next to each gateway**; every box connects to all of them (dual-homed) and each gateway uses only its own host's provider (2026-10-28, replaces the first idea of gateway 2 peering with provider 1). |
 | Boxes without `tunnelIp` | A NAT box on the legacy provider-HTTP path (old tunnel, no `tunnelIp`) matches no subnet, so it is answered by **every** healthy gateway (`pickForBox` in `GatewayHealth.ts`), yet only the gateway next to its own provider reaches it: with two gateways about half its requests fail. No code for it (decided 2026-11-02): no Yundera box is in that state; the owners of the three non-Yundera boxes on prod that are (old agent + tunnel) are asked to update before prod gets a second gateway. |
@@ -39,6 +40,12 @@ provider) leaves every gateway-routed name working.
 - A 5xx used to read as "not found" (landing page); it is now a 502, or the stale answer.
 - Limit: the cache is in memory. A gateway restarted while the backend is down knows
   nothing until the backend is back.
+- Mesh CA on a volume (gateway 1.10.0, 2026-11-03): the CA from the last good fetch is
+  kept in `GATEWAY_STATE_DIR` (`/var/lib/mesh-gateway`, a named volume), so a gateway
+  *recreated* during a backend outage starts on it after 5 tries (~10–25 s) instead of
+  exiting; without a stored copy it still waits 30 tries and exits. Staging: both gateways
+  on 1.10.0 with the volume, stored-CA start checked on nasselle. The same volume will
+  hold the gateway's own `*.<zone>` certificate.
 
 ### Backend: gateway health (`mesh-router-backend`, `GatewayHealth.ts`)
 
@@ -90,6 +97,39 @@ provider) leaves every gateway-routed name working.
 - **Provider:** `PROVIDER_API_TLS_PORT` serves `/api/` over TLS (self-signed) on its own
   port; port 80 keeps serving the tunnels.
 
+### Gateway: handoff (`mesh-router-gateway` 1.11.0, backend 2.0.58)
+
+Covers what the answers cannot: dash names (`<app>-<user>.<zone>`, answered by the parent
+zone with every healthy gateway), boxes whose zone is dormant, a NAT box connected to one
+provider only, and the seconds before the backend notices a dead provider.
+
+- **Backend, `/resolve/v2`:** each tunnel route carries `gateway`, the gateway whose
+  `DNS_GATEWAY_TUNNELS` subnet holds its `tunnelIp`; the routes of a provider that is down
+  are dropped (unless that would drop every tagged one); `gatewayIps` lists the gateways
+  (`routesForGateways` in `GatewayHealth.ts`).
+- **Gateway, direct:** no route of its own (only routes through another host's provider) →
+  the request goes to that route's `gateway`. `x-mesh-route: handoff,…`.
+- **Gateway, retry:** its own tunnel route fails to connect (connect error or the 10 s
+  connect timeout, before any byte reached the box) → the same, once, body included.
+  `x-mesh-route: retry,handoff,…`. A failure after the connection opened stays an error.
+- **The hop:** HTTPS to `<peer>:443` with SNI `<ip-dashed>.gw.<zone>`, verified against the
+  mesh CA. Each gateway holds a certificate for that name (RSA, 30 days), signed by the
+  backend on `POST /gateway-cert/<ip>` (`Authorization: Bearer <GATEWAY_CERT_TOKEN>`, `<ip>`
+  must be in `DNS_GATEWAY_IPS`), kept in the state volume, renewed at 10 days left. `gw` is
+  a reserved label: no box certificate can carry the name, and the TLS front terminates it
+  (Traefik's `HostSNIRegexp` passthrough on nasselle carries it like any `*.<zone>` name).
+- **Loops and client address:** the request carries `X-Mesh-Handoff: 1`, never handed on
+  and never sent to a box. The receiver believes the sender's `X-Real-IP` /
+  `X-Forwarded-For` only when the sender's address is in `gatewayIps`; boxes trust every
+  gateway, so they read past the sender to the client.
+- **Not covered:** boxes on the legacy provider-HTTP tunnel path (no `tunnelIp`, #936):
+  their route names no provider.
+
+Tested locally 2026-11-03 (two gateways, a mock backend, a mock box behind gateway 1's
+"tunnel", gateway 2's tunnel dead): own route ok; retry 200 after the ~3 s failed
+connect; direct handoff 200 in 70 ms; 3 MB POST through the retry intact; a client's own
+`X-Mesh-Handoff` gets no handoff and no trust; a peer is verified by its gateway name only.
+
 ### Removed: gateway peers
 
 The first plan had gateway 2 join provider 1's WireGuard network as a pinned peer
@@ -132,6 +172,33 @@ ok with both gateways and both providers up; wisera holds a tunnel route on each
 `x-mesh-route: tunnel-routed` through each gateway; nss1 after the run: provider 122 MiB,
 344 MB of 962 MB available, 4 peers with a handshake (25 before, mostly stale).
 
+**Failover drill (2026-11-03, gateway 1.10.0, tunnel 1.5.2, backend 2.0.56).** Watched
+every 5 s: both nameservers' answer for `files-wisera.inojob.com` (TTL 30) and a forced
+tunnel request through each gateway (`curl --resolve`).
+
+| Stopped (~90 s) | Detected | Effect | Recovered |
+|---|---|---|---|
+| gateway 2 (nss1) | DOWN 30 s after the stop | out of both secondaries' answers ≤ 3 s later; gateway 1 served throughout | UP 28 s after the start, back in the answers ≤ 4 s later |
+| provider 2 (nss1) | DOWN 37 s after the stop | answers unchanged for wisera (public IP, as designed); gateway 2's forced tunnel timed out, then 502. NAT box: see below | UP 26 s after the start; gateway 2's tunnel path served again 41 s after the start (WireGuard reconnect) |
+| backend (nasselle) | — | both gateways kept serving the name (`resolve_stale … backend_down_hold` / `status_503`); the secondaries kept answering | `/dns/health` ok ≤ 8 s after the start |
+
+Notes: `/dns/health` is computed at most once a minute (`CACHE_MS`), so it can show a
+state up to 60 s old (it still said gateway 2 down a minute after it was back); the
+backend log (`[gateways] … DOWN/UP`) has the exact times.
+
+**NAT box, provider 2 down (same day, 14:55).** Test box `competentleopon.inojob.com`
+(185.194.219.222, fresh install, agent stopped so it is tunnel-only, `10.78.0.27` +
+`10.79.0.6`; backend: "public IP —", zone **dormant**). Provider 2 DOWN 34 s after the stop
+and the backend logged "NAT boxes not through 51.15.79.231", but the box's names kept
+both gateways in their answer, and gateway 2 gave 502 for them until the provider was back
+(~2 min). **Gap:** the per-box gateway set is only written into a *live* user zone.
+Dash names (`<app>-<user>.<zone>`) are always answered by the parent zone with every
+healthy gateway, and so is every name of a box whose zone is dormant (not delegated).
+So a dead provider, or a NAT box connected to only one provider, fails about half of
+its dash-name requests. The 2026-10-28 drill passed because wisera's zone is live and it
+checked wisera's own name. Blocks G9 for prod (most boxes are not delegated, and dash
+names are the main path after the cutoff); see Open points.
+
 ## Adding a gateway host
 
 A gateway host runs a gateway and a tunnel provider side by side (nss1 on staging:
@@ -142,7 +209,11 @@ A gateway host runs a gateway and a tunnel provider side by side (nss1 on stagin
   address on the shared network, `TUNNEL_FORWARD_FROM` = the gateway's address.
 - **Gateway:** edge on 80/443, `BACKEND_URL` = the backend's public https URL,
   `GATEWAY_TLS_PORT=443`, `GATEWAY_FORWARDED_FOR=replace`, `TUNNEL_SUBNET` = the provider's
-  range, `TUNNEL_VIA` = the provider's address, `NET_ADMIN`.
+  range, `TUNNEL_VIA` = the provider's address, `NET_ADMIN`, and a volume on
+  `/var/lib/mesh-gateway` (gateway ≥ 1.10.0: mesh CA kept across recreates).
+  Handoff (gateway ≥ 1.11.0): `GATEWAY_PUBLIC_IP` = its address and `GATEWAY_CERT_TOKEN`,
+  on **every** gateway (the one behind Traefik too); the backend sets the same
+  `GATEWAY_CERT_TOKEN`.
 
 Order:
 
@@ -163,14 +234,10 @@ Order:
   nameserver, so no private key travels between hosts and a gateway renews while the
   backend is down. Design in [`phase-1.1-gateway-tls.md`](phase-1.1-gateway-tls.md) §6;
   built once a zone we serve ourselves is available to test on (cutoff gate G6).
-- **Gateway start needs the backend:** the entrypoint fetches the mesh CA (60 s of
-  retries, then exit). A restart keeps the previous file; a *recreate* during a backend
-  outage fails. Fix (to build): the CA on a volume; the entrypoint fetches it, falls back
-  to the stored copy when the backend can't answer, and refreshes it on success. The same
-  volume later holds the gateway's `*.<zone>` certificate.
-- **Failover drill on the current images:** step 3 of "Adding a gateway host" (stop a
-  gateway, a provider, then the backend) has not been repeated since the 2026-10-28 drill
-  above, on tunnel 1.5.2 / gateway 1.9.0.
+- **NAT boxes' dash names ignore the per-box gateway set** (found in the 2026-11-03
+  drill, above; #947). Decided: handoff with retry and mesh CA gateway certificates
+  (section above), implemented 2026-11-03 (gateway 1.11.0, backend 2.0.58, unreleased);
+  staging rollout and the NAT drill again on `competentleopon` to do. Needed before G9.
 - **Second prod gateway** (cutoff gate G9): gateway 2 + provider 2 on nsp1
   (51.15.79.11), deferred. Prod sets `TUNNEL_PROVIDERS` only then; boxes are already on
   tunnel 1.5.2.

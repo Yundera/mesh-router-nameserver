@@ -38,7 +38,7 @@ on `.sh`, up to two days on `.com`. Nothing is deleted on our side before §3 is
 | G2 | **Static zone matches Cloudflare** | `mesh-cli dns zone diff`: every static record "same"; the only differences are the NS set, proxied names (Cloudflare addresses), `ip` and delegated users (referrals) |
 | G3 | **Every public NS serves the same zone** | §1 query loop: same SOA serial on each NS |
 | G4 | **Gateway ≥ 1.7.0** (`stream_realip`, client address on terminated connections) | `docker ps` image tag. Prod on 1.9.0 (2026-11-02): met by version; a client-address check through the gateway is still to do |
-| G5 | **Traefik holds a trusted certificate for the apex** | §1.1, then `curl --resolve <zone>:443:<host ip> https://<zone>/router/api/available/x` with no `-k` |
+| G5 | **Traefik holds a trusted certificate for the apex**. Staging met 2026-11-03 (Let's Encrypt, `le` resolver, nasselle config 0ca82d0); prod to do | §1.1, then `curl --resolve <zone>:443:<host ip> https://<zone>/router/api/available/x` with no `-k` |
 | G6 | **Each gateway holds its own trusted `*.<zone>`** (ordered by DNS-01 through our nameserver, decided 2026-11-02, `phase-1.1-gateway-tls.md` §6.1; not built yet) | `curl --resolve <app>-<user>.<zone>:443:<gw ip> https://…` with no `-k`, through each gateway |
 | G7 | **Every active box has a user zone** (automatic since 2026-10-30: dormant on its first registration), boxes on a mesh-router-caddy with `caddy-dns/acmedns` | see §0.1 |
 | G8 | **Inbound mail on SendGrid Inbound Parse** (decided 2026-11-02; design in `mesh-router-root/doc/USER_MAIL.md`), moved **before** the switch so the mail change stays apart from the DNS move: `MX 10 mx.sendgrid.net`, SPF `v=spf1 include:sendgrid.net ~all`, `cf2024-1._domainkey` removed, DMARC `rua=mailto:contact@<zone>` kept (an alias the backend forwards). Staging: MX set, a received mail not yet seen. Prod: still on Cloudflare Email Routing (2026-11-03) | a mail to `contact@<zone>` arrives; the zone file has the same lines; `dns zone --dry-run` |
@@ -89,8 +89,8 @@ when the file was missing). Cloudflare forwards plain HTTP to the origin (checke
 HTTP-01 works before the switch and keeps working after it.
 
 ```bash
-cd /workspace/config/admin/traefik
-cp traefik.yml traefik.yml.bak-<date>-cutoff
+cd /workspace/config && git add -A && git commit -m "backup <date> before traefik ACME" && git push   # skip if clean
+cd admin/traefik
 docker compose stop traefik                 # every site on the host is down until the start below
 sudo rmdir /workspace/data/traefik/acme.json
 sudo install -m 600 /dev/null /workspace/data/traefik/acme.json
@@ -118,16 +118,57 @@ certificate to every router on that SNI. In `<config root>/landing-page/docker-c
 ```
 
 ```bash
-docker compose -f /workspace/config/admin/traefik/docker-compose.yml up -d traefik
+# --force-recreate: the stopped container still holds the old (directory) mount and fails to start
+docker compose -f /workspace/config/admin/traefik/docker-compose.yml up -d --force-recreate traefik
 (cd <config root>/landing-page && docker compose up -d)
 docker logs --since 5m traefik 2>&1 | grep -i acme
 echo | openssl s_client -connect <host ip>:443 -servername <zone> 2>/dev/null | openssl x509 -noout -issuer -subject -enddate
 ```
 
-Expect a Let's Encrypt issuer. Behind Cloudflare "Full" nothing changes for visitors.
+Expect a Let's Encrypt issuer (staging 2026-11-03: issued ~35 s after start). Behind Cloudflare
+"Full" nothing changes for visitors. The restart takes the host's gateway out of the DNS answers
+for ~90 s (the backend's TLS check fails while Traefik is down); the other gateway keeps serving.
+Commit and push the config repo afterwards.
 Other hosts on that Traefik (`nasselle.com`, `yundera.com`) are untouched.
 
-### 1.2 Zone and nameservers
+### 1.2 Static zone file (G1, G2)
+
+The records nobody derives (apex address, NS glue addresses, mail, site verification)
+live in `<config root>/backend/zone/<zone>.zone`, mounted as a directory so an edited
+file is seen. Staging has it since 2026-10-28 (2026-11-03: `dns zone --dry-run` no
+change, `dns zone diff` 7 same, every difference expected: NS set, proxied names,
+delegations). Prod, run by the user:
+
+```bash
+cd /workspace/config/mesh-router-nsl/backend
+grep -n 'zone\|DNS_STATIC_ZONE_FILE' docker-compose.yml; ls -la zone   # what is there already
+cp docker-compose.yml docker-compose.yml.bak-<date>-zone
+mkdir -p zone && cp <draft>/nsl.sh.zone zone/nsl.sh.zone              # draft: /d/workspace/claude/tmp/nsl.sh.zone
+```
+
+In `docker-compose.yml`, on the backend service (as on staging):
+
+```yaml
+    volumes:
+      - ./zone:/app/config/zone:ro
+    environment:
+      - DNS_STATIC_ZONE_FILE=/app/config/zone/nsl.sh.zone
+```
+
+```bash
+docker compose up -d mesh-router-backend-nsl     # recreate; the service name may differ
+B=$(docker ps --format '{{.Names}}' | grep -E 'mesh-router-backend-nsl' | head -1)
+docker exec $B mesh-cli dns zone --dry-run     # what the next reconcile pass writes (it creates the apex zone)
+docker exec $B mesh-cli dns zone diff          # every static record "same" (G2)
+```
+
+Creating the apex zone changes nothing for users: until §2 the registrar points at
+Cloudflare and nobody asks our nameservers for `nsl.sh`. The mail lines of the draft
+mirror Cloudflare Email Routing until #922 (G8) moves them; the file says what replaces
+them. Commit the file in the env's config repo (staging: `mesh-router-inojob/backend/`
+is not tracked yet, 2026-11-03).
+
+### 1.3 Zone and nameservers
 
 ```bash
 B=$(docker ps --format '{{.Names}}' | grep -E 'mesh-router-backend-(inojob|nsl)' | head -1)
@@ -145,7 +186,7 @@ done
 
 Expect the same serial on both, `A probe-x` = the gateway IPs, the NS sets = our two names.
 
-### 1.3 Dress rehearsal without touching the registrar
+### 1.4 Dress rehearsal without touching the registrar
 
 A client whose resolver is forced onto our nameservers sees the zone exactly as after
 the switch. For example an `unbound` container with
@@ -155,7 +196,7 @@ it as DNS: the apex, a dash name, a delegated user's apex and dot names, holyhor
 
 ## 2. Switch day
 
-1. Re-run §1.2. Re-check G11 (`dig +norec DS <zone> @<registry ns>`).
+1. Re-run §1.3. Re-check G11 (`dig +norec DS <zone> @<registry ns>`).
 2. Spot-check a few users that are not live yet: `dig NS <user>.<zone> @<ns1 ip>` answers
    our NS (the apex delegation), `dig SOA <user>.<zone> @<ns1 ip>` answers (the zone).
 3. **Registrar: set the NS to our two names** (staging: Namecheap › Domain › Nameservers
