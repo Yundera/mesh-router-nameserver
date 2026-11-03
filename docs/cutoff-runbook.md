@@ -8,9 +8,9 @@
 | | staging | prod |
 |---|---|---|
 | zone | `inojob.com` | `nsl.sh` |
-| registrar | Namecheap | to confirm |
+| registrar | Namecheap | Namecheap (confirmed 2026-11-02) |
 | parent NS TTL (registry) | 172800 s (`.com`) | 3600 s (`.sh`) |
-| DNSSEC at the parent | none (`delegationSigned: false`) | none (no DS at `a0.nic.sh`) |
+| DNSSEC at the parent | none (`delegationSigned: false`; no DS, re-checked 2026-11-03) | none (no DS at `a0.nic.sh`; re-checked 2026-11-03) |
 | our NS (`DNS_NS_HOSTS`) | `nss1.inojob.com` 51.15.79.231, `nss2.inojob.com` 151.115.96.14 | `nsp1.nsl.sh` 51.15.79.11, `nsp2.nsl.sh` 151.115.97.163 |
 | gateways (`DNS_GATEWAY_IPS`) | 151.115.96.14, 51.15.79.231 | 151.115.97.163 |
 | host of the backend, primary, Traefik | nasselle `ubuntu@151.115.96.14` | yundera-prod `ubuntu@151.115.97.163` |
@@ -39,12 +39,12 @@ on `.sh`, up to two days on `.com`. Nothing is deleted on our side before §3 is
 | G3 | **Every public NS serves the same zone** | §1 query loop: same SOA serial on each NS |
 | G4 | **Gateway ≥ 1.7.0** (`stream_realip`, client address on terminated connections) | `docker ps` image tag. Prod on 1.9.0 (2026-11-02): met by version; a client-address check through the gateway is still to do |
 | G5 | **Traefik holds a trusted certificate for the apex** | §1.1, then `curl --resolve <zone>:443:<host ip> https://<zone>/router/api/available/x` with no `-k` |
-| G6 | **Gateway holds a trusted `*.<zone>`** (deferred item, `phase-1.1-gateway-tls.md` §6) | `curl --resolve <app>-<user>.<zone>:443:<gw ip> https://…` with no `-k`, through each gateway |
+| G6 | **Each gateway holds its own trusted `*.<zone>`** (ordered by DNS-01 through our nameserver, decided 2026-11-02, `phase-1.1-gateway-tls.md` §6.1; not built yet) | `curl --resolve <app>-<user>.<zone>:443:<gw ip> https://…` with no `-k`, through each gateway |
 | G7 | **Every active box has a user zone** (automatic since 2026-10-30: dormant on its first registration), boxes on a mesh-router-caddy with `caddy-dns/acmedns` | see §0.1 |
-| G8 | **Inbound mail decided** (open point 3); MX, SPF, `cf2024-1` DKIM and DMARC `rua` lines of the zone file rewritten accordingly | read the file; `dns zone --dry-run` |
+| G8 | **Inbound mail on SendGrid Inbound Parse** (decided 2026-11-02; design in `mesh-router-root/doc/USER_MAIL.md`), moved **before** the switch so the mail change stays apart from the DNS move: `MX 10 mx.sendgrid.net`, SPF `v=spf1 include:sendgrid.net ~all`, `cf2024-1._domainkey` removed, DMARC `rua=mailto:contact@<zone>` kept (an alias the backend forwards). Staging: MX set, a received mail not yet seen. Prod: still on Cloudflare Email Routing (2026-11-03) | a mail to `contact@<zone>` arrives; the zone file has the same lines; `dns zone --dry-run` |
 | G9 | **≥ 2 gateways** in `DNS_GATEWAY_IPS`, on separate hosts (`architecture.md` §6, `multi-gateway.md`) | prod has one today |
-| G10 | **Glue registered** at the registrar: host objects for both NS names with their IPv4 (they sit inside the zone) | registrar UI; after §2: `dig +norec NS <zone> @<registry ns>` lists them with glue in ADDITIONAL |
-| G11 | **No DNSSEC** at the parent, and DNSSEC off in the Cloudflare zone | `dig +norec DS <zone> @<registry ns>` empty; Cloudflare › DNS › Settings |
+| G10 | **Glue registered** at the registrar: host objects for both NS names with their IPv4 (they sit inside the zone). Namecheap › Domain › Advanced DNS › Personal DNS Server; the domain's Nameservers setting stays on Cloudflare until §2. Not done yet (2026-11-03) | before §2: `curl -s -o /dev/null -w '%{http_code}' https://rdap.verisign.com/com/v1/nameserver/nss1.inojob.com` = 200 (404 today), same for each NS name; after §2: `dig +norec NS <zone> @<registry ns>` lists them with glue in ADDITIONAL |
+| G11 | **No DNSSEC** at the parent, and DNSSEC off in the Cloudflare zone. Parent side met on both zones (no DS, 2026-11-03); Cloudflare side to confirm in the UI | `dig +norec DS <zone> @<registry ns>` empty; Cloudflare › DNS › Settings |
 | G12 | **Cloudflare export saved** (BIND file, dated) next to the zone file | file present |
 
 ### 0.1 G7: users at the switch
@@ -66,9 +66,10 @@ zone already carries `<user> NS` for each of them, so nothing has to be done per
   live, and each box orders its certificates. Until it has them its apex and dot names
   fail the TLS handshake (dash names are unaffected). One visible window, no step.
 - **Let's Encrypt limit**: every box orders at once, against one registered domain
-  (≈50 new certificates per week until the zone is on the Public Suffix List). With more
-  boxes than that, either the PSL entry lands first, or most users are moved by
-  Cloudflare batches over the preceding weeks.
+  (50 new certificates per week). Decided 2026-11-02: **no Public Suffix List entry and
+  no rate-limit request**; we live with 50/week (~33 boxes at the prod switch today).
+  If the fleet outgrows that, most users are moved by Cloudflare batches over the
+  preceding weeks.
 
 Check before §2: `mesh-cli dns zone --dry-run` lists a `<user> NS` per user zone;
 `mesh-cli dns sync --prune --dry-run` reports no orphan.
@@ -95,8 +96,8 @@ sudo rmdir /workspace/data/traefik/acme.json
 sudo install -m 600 /dev/null /workspace/data/traefik/acme.json
 ```
 
-Append to `traefik.yml` (the address is the ACME account contact, not `contact@<zone>`
-until point 3 is settled):
+Append to `traefik.yml` (the address is the ACME account contact: `staging@yundera.com`
+on staging, decided 2026-11-02; an ops address on prod):
 
 ```yaml
 certificatesResolvers:
@@ -184,10 +185,13 @@ it as DNS: the apex, a dash name, a delegated user's apex and dot names, holyhor
    @   CAA 0 issuewild "letsencrypt.org"
    ```
 
-   added to the zone file, then `mesh-cli dns zone --dry-run` and wait one pass.
+   added to the zone file, then `mesh-cli dns zone --dry-run` and wait one pass. Once
+   the gateways order their own `*.<zone>` (G6), narrow these to Traefik's and each
+   gateway's ACME account (`; accounturi=…`, `phase-1.1-gateway-tls.md` §6.1).
 7. **SendGrid**: Settings › Sender Authentication › the domain › Verify. Send a test
    mail from a box and check DKIM=pass and DMARC=pass in the received headers.
-8. Inbound mail as decided in G8: send a mail to the contact address.
+8. Inbound mail (G8, already on SendGrid Inbound Parse): send a mail to `contact@<zone>`
+   and check it is forwarded.
 
 ## 3. Drain (≥ 48 h after the switch)
 
@@ -214,7 +218,7 @@ zone, the Worker and its route untouched during the drain.
 - `mesh-router-gateway-cf` is retired: archive the repo, drop the deploy steps from the
   docs and the `cf-worker` trace segment from CLAUDE.md files.
 - Later, separately: DNSSEC (`architecture.md` §10.5, never in the same step as an NS
-  change), PSL entry.
+  change). No PSL entry (decided 2026-11-02).
 
 ## 5. Staging rehearsal: what differs
 

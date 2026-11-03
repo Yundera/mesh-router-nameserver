@@ -16,7 +16,8 @@ provider) leaves every gateway-routed name working.
 | DNS | A gateway answer lists the healthy gateways (`DNS_GATEWAY_IPS`, two `A`, TTL 30). The backend health-checks them and drops a dead one; none healthy = all listed. |
 | NAT box answer | A NAT box is answered only by the gateways that can reach it: those whose tunnel subnet holds one of its `tunnelIp`s and whose local provider is up (`DNS_GATEWAY_TUNNELS`, option A of 2026-10-28; gateway-to-gateway forwarding was set aside). |
 | Backend down | Each gateway keeps the last resolution (serve-stale, 24 h) and uses it while the backend cannot answer. Gateway 2 therefore outlives the backend's host for every name it has served recently. |
-| NAT boxes | A **tunnel provider next to each gateway**; every box connects to all of them (dual-homed) and each gateway uses only its own host's provider (2026-10-28, replaces the first idea of gateway 2 peering with provider 1). Boxes on the legacy provider-HTTP path (no `tunnelIp`) are out of scope. |
+| NAT boxes | A **tunnel provider next to each gateway**; every box connects to all of them (dual-homed) and each gateway uses only its own host's provider (2026-10-28, replaces the first idea of gateway 2 peering with provider 1). |
+| Boxes without `tunnelIp` | A NAT box on the legacy provider-HTTP path (old tunnel, no `tunnelIp`) matches no subnet, so it is answered by **every** healthy gateway (`pickForBox` in `GatewayHealth.ts`), yet only the gateway next to its own provider reaches it: with two gateways about half its requests fail. No code for it (decided 2026-11-02): no Yundera box is in that state; the owners of the three non-Yundera boxes on prod that are (old agent + tunnel) are asked to update before prod gets a second gateway. |
 | Provider discovery | The backend lists the extra providers in `/version` (`tunnelProviders`, from `TUNNEL_PROVIDERS`); the box's requester connects to each besides its own `PROVIDER`. Adding a provider = backend env, no template change. |
 | Provider 2 API | Its own port with self-signed TLS (`PROVIDER_API_TLS_PORT`), since the gateway owns 80/443 on that host. |
 | Edge | Gateway 2 is the edge on its host: no Traefik, `GATEWAY_TLS_PORT=443`, ports 80 + 443 published, `GATEWAY_FORWARDED_FOR=replace`. |
@@ -122,6 +123,15 @@ roots + the mesh CA. And a `mesh-cli dns force|delegate` could be undone by the 
 next pass for up to ~5 min (cached scope in another process); the backend now reloads
 its scope after any change (`dns:scope:changed` in Redis).
 
+**Fleet rollout (2026-11-02/03).** Tunnel 1.5.2 is pinned on the mesh template's `main`
+and `stable` channels (template 8a47288), so every box on the template connects to all
+providers since its 03:00 run on 2026-11-03. Staging runs published images only: nss1
+tunnel 1.5.2 + gateway 1.9.0, nasselle provider 1.5.2. Re-checked 2026-11-03: `/dns/health`
+ok with both gateways and both providers up; wisera holds a tunnel route on each provider
+(`10.78.0.6`, `10.79.0.2`); `files-wisera.inojob.com` with `X-Mesh-Force: tunnel` gives
+`x-mesh-route: tunnel-routed` through each gateway; nss1 after the run: provider 122 MiB,
+344 MB of 962 MB available, 4 peers with a handshake (25 before, mostly stale).
+
 ## Adding a gateway host
 
 A gateway host runs a gateway and a tunnel provider side by side (nss1 on staging:
@@ -148,18 +158,23 @@ Order:
 
 ## Open points
 
-- **Shared `*.<zone>` certificate (brainstorm).** After the Cloudflare cutoff dash names
-  and reserved labels terminate at the gateway with one `*.<zone>` certificate (Phase 1.1
-  step 1). Decided: both gateways share **one** certificate. Open: who orders and holds
-  it, and how each gateway gets it. Candidates to weigh: the backend orders it (DNS-01
-  into its own zone, it already writes `_acme-challenge`) and serves it to gateways over
-  an authenticated route; one gateway orders and the other pulls; an external store.
-  Questions: key distribution and its auth, renewal and reload, what a gateway serves
-  while the backend is down (it keeps the last one on disk).
+- **`*.<zone>` certificate: one per gateway** (decided 2026-11-02, replaces the earlier
+  "one shared certificate"). Each gateway orders its own by DNS-01 through our
+  nameserver, so no private key travels between hosts and a gateway renews while the
+  backend is down. Design in [`phase-1.1-gateway-tls.md`](phase-1.1-gateway-tls.md) §6;
+  built once a zone we serve ourselves is available to test on (cutoff gate G6).
 - **Gateway start needs the backend:** the entrypoint fetches the mesh CA (60 s of
   retries, then exit). A restart keeps the previous file; a *recreate* during a backend
-  outage fails. Fix: keep the CA on a volume.
-- **Usage (DAU):** nothing to do on a gateway any more: the boxes report it themselves
-  (mesh-router-agent, `POST /usage/:userid/:sig`).
-- **Fleet:** boxes act on `tunnelProviders` only with the new requester (tunnel image
-  bump + template pin); wisera runs it by hand until the 03:00 self-check reverts it.
+  outage fails. Fix (to build): the CA on a volume; the entrypoint fetches it, falls back
+  to the stored copy when the backend can't answer, and refreshes it on success. The same
+  volume later holds the gateway's `*.<zone>` certificate.
+- **Failover drill on the current images:** step 3 of "Adding a gateway host" (stop a
+  gateway, a provider, then the backend) has not been repeated since the 2026-10-28 drill
+  above, on tunnel 1.5.2 / gateway 1.9.0.
+- **Second prod gateway** (cutoff gate G9): gateway 2 + provider 2 on nsp1
+  (51.15.79.11), deferred. Prod sets `TUNNEL_PROVIDERS` only then; boxes are already on
+  tunnel 1.5.2.
+
+Closed: usage (DAU) is reported by the boxes themselves (mesh-router-agent,
+`POST /usage/:userid/:sig`), not by a gateway; the fleet runs the multi-provider requester
+(tunnel 1.5.2, see the staging section).

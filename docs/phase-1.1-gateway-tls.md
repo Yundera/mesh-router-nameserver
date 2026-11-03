@@ -315,7 +315,32 @@ non-delegated box the mesh CA.
 > later. Before the cutoff the gateway's certificate only matters behind Cloudflare
 > ("Full (strict)"), and nothing else in 1.1 needs it. At the cutoff the zone is ours: the
 > backend writes `_acme-challenge.<zone>` TXT directly, no CNAME, no `acme.` zone. The
-> CNAME design below is kept for the record.
+> CNAME design further down is kept for the record.
+
+### 6.1 Decision (2026-11-02): each gateway orders its own
+
+With two gateways or more (`multi-gateway.md`), **each gateway orders its own
+`*.<zone>`** from Let's Encrypt by DNS-01 through our nameserver. This replaces both the
+backend-issued certificate below and the "one shared certificate" idea of
+`multi-gateway.md`: no private key leaves the host it was made on, there is nothing to
+distribute or authenticate between hosts, and a gateway renews on its own while the
+backend's host is down (as long as the hidden primary reaches the secondaries again
+before the certificate expires).
+
+| Part | Design |
+|---|---|
+| ACME client | `lego` with its acme-dns provider, beside the gateway (same container or a sidecar), one ACME account per gateway. Names: `*.<zone>` (dash names, reserved labels). The apex stays on Traefik (cutoff gate G5). |
+| Challenge | The backend's acme-dns API (`architecture.md` §7.2) gains a **per-gateway credential** whose only allowed name is `_acme-challenge.<zone>`, written to the apex zone on the hidden primary. Several TXT values coexist at that name (two gateways ordering in the same window), each deleted after 10 minutes like the user values. |
+| Storage | The certificate and key live on the gateway's volume (the same one that keeps the mesh CA, `multi-gateway.md` open points), so a recreate during a backend outage still starts with them. |
+| Reload | After issue or renewal: nginx reload, no restart. |
+| CAA | The apex `CAA issue/issuewild "letsencrypt.org"` gets an `accounturi` per gateway account (cutoff-runbook §2 step 6), so only our gateways and Traefik can order for the zone. |
+| Monitoring | Each gateway reports its certificate's `notAfter`, so `/dns/health` (and the external monitor behind it) can flag a renewal that failed; the threshold is set at build time. |
+| Rate limits | Same names from each gateway = one duplicate certificate per gateway; Let's Encrypt allows 5 duplicates per week, and renewals are exempt from the 50/week new-certificate limit. |
+
+**Build:** once a zone we serve ourselves is available to test on (inojob.com after its
+NS switch, or a test zone), before the prod cutoff (gate G6). Until then nothing ships.
+
+### 6.2 Earlier design (backend-issued, kept for the record)
 
 One Let's Encrypt certificate for `*.<zone>`, issued by the backend by DNS-01 (it
 replaces the per-user `GatewayCerts` orders; the machinery stays). While Cloudflare still
