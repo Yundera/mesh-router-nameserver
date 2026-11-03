@@ -614,7 +614,7 @@ extension; it needs the same probe on v6.
 | Box offline | Route expires → gateway → gateway shows the offline/landing page. |
 | Cert issuance fails | Stays gateway. Invisible to the user; visible in the dashboard `reason`. |
 | Cert about to expire | Downgraded to gateway before `notAfter` (margin), back up once renewed. |
-| One public nameserver down | The other answers; the returning one catches up by IXFR. |
+| One public nameserver down | The other answers, **provided the parent delegates to both** (a user's NS records in the parent must list every nameserver). The returning one missed the NOTIFYs (the primary gives up re-sending after a few tries); it asks the primary for every zone at start (nameserver image ≥ 1.3.3), and the backend NOTIFYs again any zone a nameserver is still off after a minute (backend ≥ 2.0.59, health checked every 2 min). Drilled 2026-11-03 (§13.2). |
 | Both nameservers down | Everything under the zone fails, apex and mail included. This is why §10.4 is a hard requirement. |
 | One gateway down | Clients retry the second `A`; the backend drops it from the answer after two failed checks ([`multi-gateway.md`](multi-gateway.md)). |
 | Gateway flooded | Direct boxes are unaffected; gateway-routed names degrade. |
@@ -678,6 +678,26 @@ equivalents are chosen the same way.
 **Exit criteria:** wisera delegated on staging for a few weeks with direct, gateway,
 tunnel and force all exercised on dot-form names; nip.io gone from the staging fleet;
 static zone file in sync; then the same on prod with pilot users.
+
+**Nameserver outage drill (staging, 2026-11-03).** wisera (live, direct), each container
+stopped ~90 s, watched every 5 s: serial and answer at nss1/nss2, an uncached random dot
+name through 1.1.1.1 and 8.8.8.8, `https://wisera.inojob.com`. During each outage a
+`mesh-cli dns force wisera gateway`, then `auto`, moved the serial.
+
+| Stopped | Result |
+|---|---|
+| nss2 | Passed: nss1 answered alone, both changes reached it within seconds, 1.1.1.1/8.8.8.8 followed. nss2 came back on its old serial and stayed there (missed NOTIFYs). |
+| nss1 | **Failed for public resolution:** 1.1.1.1 and 8.8.8.8 answered SERVFAIL for uncached names for the whole outage while nss2 answered fine. Cause: Cloudflare delegates `wisera` to **nss1 only** (the zone's own NS set lists both, which is what `mesh-cli dns status` shows). nss1 came back stale, like nss2. |
+| hidden primary | Passed: both secondaries kept serving; `/dns/health` `degraded` ("hidden primary unreachable") within ~30 s; a force during the outage failed (`fetch failed`) but was kept and applied by the backend's first pass after the restart (~36 s), which also brought the stale nss1 up to date. |
+
+Follow-ups (#948): (1) add `wisera NS nss2.inojob.com` in Cloudflare, re-run the nss1
+step; the prod pilots (#923) get both NS records from the start. The backend now asks the
+parent zone's own servers for each live user's NS set (`DnsWire.ts`, at every live check):
+`mesh-cli dns status` shows it under "parent NS" with what to add, and `/dns/health`
+counts live zones the parent delegates to only part of the nameservers
+(`partialDelegations`, degraded). (2) A restarted secondary asks the primary for every
+zone at start (nameserver image entrypoint), and `/dns/health`, now run every 2 min by the
+backend itself, re-NOTIFYs a zone a nameserver is still off after a minute.
 
 ### 13.3 Later phases
 

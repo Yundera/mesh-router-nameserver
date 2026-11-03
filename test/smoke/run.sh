@@ -2,7 +2,8 @@
 # Smoke test: build the image, then check what a deploy relies on —
 #   the primary takes API writes as the backend makes them (catalog Producer + allow zone),
 #   the secondary consumes the catalog, transfers the allow zone, answers an allowed IP
-#   and not an unlisted one, and picks up a new allow record by NOTIFY.
+#   and not an unlisted one, picks up a new allow record by NOTIFY, and catches up on a
+#   change it missed while stopped.
 # usage: sh test/smoke/run.sh   (Docker + compose; cleans up after itself)
 set -eu
 cd "$(dirname "$0")"
@@ -55,6 +56,20 @@ allow 203-0-113-8 203.0.113.8 || fail "allow 203.0.113.8"
 # NOTIFY → transfer; the packet cache (20 s) may still hold the empty answer
 wait_for 30 "$Q app-203-0-113-8.ip.smoke.test" 203.0.113.8 || fail "new allow record not picked up"
 echo "ok   new allow record picked up"
+
+# a secondary down while the primary changes a zone misses the NOTIFY; at start it asks
+# the primary for every secondary zone (entrypoint catch-up) instead of waiting for its
+# SOA refresh (900 s)
+SOA='+short +time=2 +tries=1 SOA allow.ip.smoke.test.invalid'
+dc stop secondary >/dev/null 2>&1
+allow 203-0-113-9 203.0.113.9 || fail "allow 203.0.113.9"
+primary_serial=$(in_client "dig @172.16.54.10 $SOA" | awk '{print $3}')
+# long enough for the primary to give up re-sending its NOTIFY (as in the 2026-11-03 drill)
+sleep "${SMOKE_SECONDARY_DOWN:-100}"
+dc start secondary >/dev/null 2>&1
+wait_for 30 "dig @172.16.54.11 $SOA | awk '{print \$3}'" "$primary_serial" \
+  || fail "restarted secondary did not catch up (primary serial $primary_serial)"
+echo "ok   restarted secondary caught up on a missed change"
 
 dc run --rm --no-deps -e ROLE= secondary >/dev/null 2>&1 && fail "missing ROLE accepted"
 echo "ok   missing ROLE refused"

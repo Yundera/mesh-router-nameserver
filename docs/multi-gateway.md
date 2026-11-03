@@ -130,6 +130,18 @@ Tested locally 2026-11-03 (two gateways, a mock backend, a mock box behind gatew
 connect; direct handoff 200 in 70 ms; 3 MB POST through the retry intact; a client's own
 `X-Mesh-Handoff` gets no handoff and no trust; a peer is verified by its gateway name only.
 
+**Staging (2026-11-03, backend 2.0.58, gateway 1.11.0 on both).** `GATEWAY_CERT_TOKEN` in
+the backend's `.env` and in a `.env` beside each gateway compose, `GATEWAY_PUBLIC_IP` per
+gateway; each gateway got its certificate at start (gateway 1 presents it through Traefik's
+passthrough). NAT drill on `competentleopon` again, provider 2 stopped ~100 s, the box's
+dash name through each gateway every 5 s: **no failed request**. Through gateway 2:
+`retry,handoff` for ~55 s (the first two 10 s, the connect timeout; then ~3 s, the failed
+connect), then `handoff` in ~0.2 s once its cached routes expired (the backend dropped
+provider 2's route 39 s after the stop), a short `retry,handoff` after the start while the
+box's WireGuard reconnected, then its own tunnel again. Gateway 1 saw the handed-over
+requests from 51.15.79.231 (trusted, in `gatewayIps`) with the client in
+`X-Forwarded-For`, and served them over its own tunnel.
+
 ### Removed: gateway peers
 
 The first plan had gateway 2 join provider 1's WireGuard network as a pinned peer
@@ -236,8 +248,9 @@ Order:
   built once a zone we serve ourselves is available to test on (cutoff gate G6).
 - **NAT boxes' dash names ignore the per-box gateway set** (found in the 2026-11-03
   drill, above; #947). Decided: handoff with retry and mesh CA gateway certificates
-  (section above), implemented 2026-11-03 (gateway 1.11.0, backend 2.0.58, unreleased);
-  staging rollout and the NAT drill again on `competentleopon` to do. Needed before G9.
+  (section above): gateway 1.11.0 and backend 2.0.58, live on staging 2026-11-03, NAT
+  drill passed. Prod gets it with G9. Left: the first retries wait the 10 s connect timeout
+  (WireGuard to a dead provider times out rather than failing fast).
 - **Second prod gateway** (cutoff gate G9): gateway 2 + provider 2 on nsp1
   (51.15.79.11), deferred. Prod sets `TUNNEL_PROVIDERS` only then; boxes are already on
   tunnel 1.5.2.

@@ -49,6 +49,23 @@ secondary)
   # shellcheck disable=SC2086
   pdnsutil rrset replace "$IPZ" "$IPZ" NS 300 $ns_records
   pdnsutil rrset replace "$IPZ" "*.$IPZ" LUA 300 'A ";return ipname4()"' 'AAAA ";return ipname6()"'
+
+  # Catch-up after a restart: PowerDNS does not re-check its secondary zones at start, so
+  # one that was down while the primary changed (it missed the NOTIFY) would serve the old
+  # copy until its SOA refresh (900 s). Once the server answers, ask the primary for each
+  # secondary zone and the catalog (2026-11-03 outage drill, #948). Background: the server
+  # is exec'd below; tini reaps this subshell.
+  (
+    for _ in $(seq 1 60); do
+      pdns_control rping >/dev/null 2>&1 && break
+      sleep 1
+    done
+    n=0
+    for z in "$CAT" $(pdnsutil zone list-all secondary 2>/dev/null); do
+      pdns_control retrieve "$z" >/dev/null 2>&1 && n=$((n + 1))
+    done
+    echo "nameserver: catch-up after start, asked the primary for $n zone(s)"
+  ) &
   ;;
 *)
   echo "nameserver: set ROLE=primary or ROLE=secondary" >&2

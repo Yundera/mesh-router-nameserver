@@ -67,6 +67,12 @@ rebuilds `ip.<zone>` from env on every start, so changing `NS_HOSTS` only needs 
 recreate. `TEMPLATE_FILES` adds an operator template mounted in
 `/etc/powerdns/templates.d/`.
 
+A secondary asks the primary for the catalog and every secondary zone right after it
+starts (`pdns_control retrieve`, logged as "catch-up after start"). PowerDNS does not
+re-check its zones at start, and the primary stops re-sending a NOTIFY after a few
+tries, so a node that was down while a zone changed would otherwise serve the old copy
+until its SOA refresh (900 s).
+
 ## Running it
 
 **Public secondary**: one per host, on UDP and TCP 53:
@@ -130,8 +136,9 @@ catalog consumer with `pdnsutil zone show` until it reports an update.
 ## Tests
 
 - `sh test/smoke/run.sh` builds the image and runs a primary, a secondary and a client.
-  It checks API writes, catalog consumption, the allowlist transfer, gated answers and
-  NOTIFY.
+  It checks API writes, catalog consumption, the allowlist transfer, gated answers,
+  NOTIFY, and the catch-up of a secondary stopped while a zone changed (down 100 s, past
+  the primary's NOTIFY retries; `SMOKE_SECONDARY_DOWN` sets it).
 - `test/ipname/` compares `ipname.lua` against the sslip.io server, answer for answer,
   over a 581-name corpus.
 
