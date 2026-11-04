@@ -67,7 +67,7 @@ WireGuard tunnel.
 | DNS-01 API | The backend implements the **acme-dns API**, so Caddy (`caddy-dns/acmedns`), lego, certbot and acme.sh all work unchanged. |
 | Box Caddy | `mesh-router-caddy` moves from the stock `caddy-docker-proxy:ci-alpine` image (unpinned) to an xcaddy build with `caddy-docker-proxy` + `caddy-dns/acmedns`, pinned. |
 | IP names | `<app>-<dashed-ip>.ip.<zone>` stays, permanently (§3.3). `nip.io` is removed; `sslip.io` stays as the break-glass fallback. |
-| Public Suffix List | **No PSL entry, no Let's Encrypt rate-limit request** (decided 2026-11-02): every user shares the 50 new certificates/week of the zone (§7.5), which the DNS-01 wildcard per box keeps within reach. |
+| Public Suffix List | **Application in progress, nothing waits for it; no Let's Encrypt rate-limit request** (decided 2026-11-02; `_psl` TXT in the zone file): until it lands every user shares the 50 new certificates/week of the zone (§7.5), which the DNS-01 wildcard per box keeps within reach. |
 | Migration | Users move one at a time through per-user NS delegation while Cloudflare keeps the zone (§13.1). Staging first, wisera as test user. |
 | Mail | Outbound SendGrid records move with the zone and must exist from minute one. Inbound mail moves from Cloudflare Email Routing to **SendGrid Inbound Parse** before the cutoff (decided 2026-11-02, §9.2). |
 
@@ -100,7 +100,8 @@ Consequences:
 
 ### 3.2 PSL interaction
 
-> No PSL entry is planned (decided 2026-11-02, §2); kept for the record should it come back.
+> The `nsl.sh` PSL application is in progress (`_psl` TXT, publicsuffix/list pull request 3496);
+> nothing waits for it (decided 2026-11-02, §2). This section is what changes when it lands.
 
 With `nsl.sh` on the Public Suffix List, the registrable domain of `immich.john.nsl.sh`
 is `john.nsl.sh`: rate limits and cookies are **per user**. In dash form each
@@ -604,7 +605,7 @@ extension; it needs the same probe on v6.
 | **Maison + mesh template** | Dot-form routes canonical, dash form as alias; nip.io routes no longer rendered. |
 | **mesh-dashboard** | Per-host state table and the owner's `gateway`/`auto` toggle (§4.3). |
 | **mesh-router-gateway-cf** | Retired. |
-| **Ops** | Zone export → git; mail moves (§9.2); second NS host; registrar delegation (Namecheap, glue first). No PSL. |
+| **Ops** | Zone export → git; mail moves (§9.2); second NS host; registrar delegation (Namecheap, glue first). PSL application on its own track. |
 
 ## 12. Failure modes
 
@@ -662,7 +663,7 @@ already exist, dormant, on nsp1 and nsp2, and wait for their NS records in Cloud
 |---|---|---|
 | Naming | Dot form rendered **alongside** the dash form on every box, for store apps and platform stacks (Dex and Authelia dash-form only: their issuer URLs); the dash form stays the primary (Maison's default domain). Auth registrar accepts dot-form redirect hosts (revised 2026-10-25) | No certificate is ordered for a dot name: the box's static `*.<domain>` site covers them, with a local certificate until the zone is delegated. On a non-delegated box the dot names resolve to Cloudflare, whose edge certificate covers one level only, so nothing reaches the box by them |
 | Naming | Reserved labels + no-dash rule at signup (§3.4); audit existing usernames | Signup-only |
-| Naming | Cookie check (AppShield gates host-only; Authelia already is) (no PSL submission, decided 2026-11-02) | No change |
+| Naming | Cookie check (AppShield gates host-only; Authelia already is) (PSL submission in progress, §3.2) | No change |
 | Nameserver | PowerDNS secondaries replace the stock sslip.io server on the public NS hosts: `ip.<zone>` from the LUA wildcard, compared answer for answer with the sslip.io server first; user zones (dormant per box, live once delegated) and challenge TXT by transfer from the hidden primary in the backend stack | `ip.<zone>` answers unchanged; a dormant zone is asked by nobody until its NS record exists |
 | Nameserver | Static zone file (server config, §3.5) from the Cloudflare export, loaded by the backend into the apex zone on the primary; `mesh-cli dns zone diff` compares it with live Cloudflare answers. Served by our nameservers, asked by nobody until the registrar switch | Not delegated |
 | Nameserver | Metrics, external DNS monitor (SOA serial of primary vs every secondary), shadow log in the backend of the answer each user would get | Observation only |

@@ -38,10 +38,10 @@ on `.sh`, up to two days on `.com`. Nothing is deleted on our side before §3 is
 | G2 | **Static zone matches Cloudflare** | `mesh-cli dns zone diff`: every static record "same"; the only differences are the NS set, proxied names (Cloudflare addresses), `ip` and delegated users (referrals) |
 | G3 | **Every public NS serves the same zone** | §1 query loop: same SOA serial on each NS |
 | G4 | **Gateway ≥ 1.7.0** (`stream_realip`, client address on terminated connections) | `docker ps` image tag. **Met on prod 2026-11-03** (gateway 1.9.0): a dash name of holyhorse sent straight to the prod gateway (`curl --resolve …:443:151.115.97.163`, no Cloudflare) reached a whoami behind the box's Caddy with `X-Real-Ip` = the client and `X-Forwarded-For: <client>, 151.115.97.163` (the box trusts the gateway). Today's Cloudflare path hands the client only in `Cf-Connecting-Ip` (`X-Forwarded-For` = a Cloudflare address); that path goes away at the cutoff |
-| G5 | **Traefik holds a trusted certificate for the apex**. Staging met 2026-11-03 (Let's Encrypt, `le` resolver, nasselle config 0ca82d0); prod to do | §1.1, then `curl --resolve <zone>:443:<host ip> https://<zone>/router/api/available/x` with no `-k` |
+| G5 | **Traefik holds a trusted certificate for the apex**. Staging met 2026-11-03 (Let's Encrypt, `le` resolver, nasselle config 0ca82d0). Prod configured 2026-11-04 (`le` resolver, requested by the `nsl-backend` router, contact@yundera.com, prod config fbf5feb; `acme.json` was already a file) but **not issued**: Let's Encrypt answered 429, 50 new certificates for `nsl.sh` already issued in the last 168 h (boxes ordering per-app dash-name certificates, mostly the recycled demo boxes). Restart Traefik to retry once a slot is free | §1.1, then `curl --resolve <zone>:443:<host ip> https://<zone>/router/api/available/x` with no `-k` |
 | G6 | **Each gateway holds its own trusted `*.<zone>`** (each gateway orders it with lego by DNS-01: through Cloudflare's API before the switch, the backend's apex challenge after, `phase-1.1-gateway-tls.md` §6. **Staging met 2026-11-04** on nasselle + nss1 (gateway 1.13.0, backend 2.0.60); prod not yet. At the switch: `GATEWAY_ACME_DNS=mesh` on each gateway, delete the Cloudflare token. `/dns/health` lists each gateway's certificate, degraded under `DNS_GATEWAY_CERT_MIN_DAYS`) | `curl --resolve <app>-<user>.<zone>:443:<gw ip> https://…` with no `-k`, through each gateway |
 | G7 | **Every active box has a user zone** (automatic since 2026-10-30: dormant on its first registration), boxes on a mesh-router-caddy with `caddy-dns/acmedns` | see §0.1 |
-| G8 | **Inbound mail on SendGrid Inbound Parse** (decided 2026-11-02; design in `mesh-router-root/doc/USER_MAIL.md`), moved **before** the switch so the mail change stays apart from the DNS move: `MX 10 mx.sendgrid.net`, SPF `v=spf1 include:sendgrid.net ~all`, `cf2024-1._domainkey` removed, DMARC `rua=mailto:contact@<zone>` kept (an alias the backend forwards). Staging: MX set, a received mail not yet seen. Prod: still on Cloudflare Email Routing (2026-11-03) | a mail to `contact@<zone>` arrives; the zone file has the same lines; `dns zone --dry-run` |
+| G8 | **Inbound mail on SendGrid Inbound Parse** (decided 2026-11-02; design in `mesh-router-root/doc/USER_MAIL.md`), moved **before** the switch so the mail change stays apart from the DNS move: `MX 10 mx.sendgrid.net`, SPF `v=spf1 include:sendgrid.net ~all`, `cf2024-1._domainkey` removed, DMARC `rua=mailto:contact@<zone>` kept (an alias the backend forwards). Staging: **verified 2026-11-04** (a Gmail message to `contact@inojob.com` was forwarded). **Prod met 2026-11-04** (#956: Email Routing off, MX/SPF on SendGrid, a Gmail message to `contact@nsl.sh` forwarded; #941: zone file lines match, `dns zone diff` "same", prod config 790bc46) | a mail to `contact@<zone>` arrives; the zone file has the same lines; `dns zone --dry-run` |
 | G9 | **≥ 2 gateways** in `DNS_GATEWAY_IPS`, on separate hosts (`architecture.md` §6, `multi-gateway.md`) | prod has one today |
 | G10 | **Glue registered** at the registrar: host objects for both NS names with their IPv4 (they sit inside the zone). Namecheap › Domain › Advanced DNS › Personal DNS Server; the domain's Nameservers setting stays on Cloudflare until §2 (pick **Custom** in the host dropdown, not `ns1`–`ns5`). **Met 2026-11-04**: `nss1.inojob.com` 51.15.79.231, `nss2.inojob.com` 151.115.96.14, `nsp1.nsl.sh` 51.15.79.11, `nsp2.nsl.sh` 151.115.97.163 | before §2: `curl -s https://rdap.verisign.com/com/v1/nameserver/nss1.inojob.com` (.com) / `https://rdap.identitydigital.services/rdap/nameserver/nsp1.nsl.sh` (.sh) = 200 with the IP, for each NS name; after §2: `dig +norec NS <zone> @<registry ns>` lists them with glue in ADDITIONAL |
 | G11 | **No DNSSEC** at the parent, and DNSSEC off in the Cloudflare zone. **Met 2026-11-04** on both zones: no DS at the parent, and no DNSKEY served by Cloudflare (it publishes one as soon as DNSSEC is enabled, even pending) | `dig +norec DS <zone> @<registry ns>` empty; `dig DNSKEY <zone>` empty |
@@ -66,8 +66,10 @@ zone already carries `<user> NS` for each of them, so nothing has to be done per
   live, and each box orders its certificates. Until it has them its apex and dot names
   fail the TLS handshake (dash names are unaffected). One visible window, no step.
 - **Let's Encrypt limit**: every box orders at once, against one registered domain
-  (50 new certificates per week). Decided 2026-11-02: **no Public Suffix List entry and
-  no rate-limit request**; we live with 50/week (~33 boxes at the prod switch today).
+  (50 new certificates per week). Decided 2026-11-02: **don't wait for the Public Suffix List
+  and no rate-limit request**; we live with 50/week (~33 boxes at the prod switch today). The
+  `nsl.sh` PSL application is in progress (`_psl` TXT in the zone file, pull request 3496): once
+  merged, each user gets their own bucket.
   If the fleet outgrows that, most users are moved by Cloudflare batches over the
   preceding weeks.
 
@@ -259,7 +261,7 @@ zone, the Worker and its route untouched during the drain.
 - `mesh-router-gateway-cf` is retired: archive the repo, drop the deploy steps from the
   docs and the `cf-worker` trace segment from CLAUDE.md files.
 - Later, separately: DNSSEC (`architecture.md` §10.5, never in the same step as an NS
-  change). No PSL entry (decided 2026-11-02).
+  change). The PSL application (`_psl` TXT) runs on its own; nothing in the cutoff depends on it.
 
 ## 5. Staging rehearsal: what differs
 
