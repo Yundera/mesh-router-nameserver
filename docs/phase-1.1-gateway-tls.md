@@ -493,7 +493,10 @@ Step 6 rollout order (each environment):
    gateway 1.5 then already connects with SNI `<label>.box.<zone>`. Staging 2026-10-27:
    wisera's cert0 reissued (`*.ip.inojob.com`, `wisera.box.inojob.com`, IP), gateway,
    routed tunnel and direct paths unchanged, no ACME attempt by Caddy for dash names
-   (they keep cert0 by tag). `*.ip.<zone>` stays: deployment config (`CERT_EXTRA_SANS`)
+   (they keep cert0 by tag). **Wrong, found 2026-11-04:** Caddy automates every site name no
+   loaded certificate covers, so every box ordered a Let's Encrypt certificate per dash name and
+   for its non-delegated root (HTTP-01 through the Worker), filling the zone's 50/week. Fixed in
+   mesh-router-caddy 1.5.1 / the template Caddyfile: `(gateway_tls)` loads cert0 with `issuer internal`. `*.ip.<zone>` stays: deployment config (`CERT_EXTRA_SANS`)
    for the Worker's IP-name path, not a user's name.
 2. **Gateway 1.6 once every live box holds a hop name**: it always sends
    `<label>.box.<zone>` and trusts the mesh CA only, so a box whose cert0 predates
