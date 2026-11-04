@@ -311,8 +311,8 @@ non-delegated box the mesh CA.
 > **Built and live on staging (2026-11-04), before the cutoff.** Decision of 2026-11-04 (Trello
 > #950): each gateway orders `*.<zone>` with lego from now on, the challenge TXT written through
 > **Cloudflare's API** while Cloudflare holds the zone (a TXT sits beside Cloudflare's own
-> records; only the CNAME below conflicted), then through our acme-dns from the switch on (one
-> env change per gateway, token deleted). The certificate exists on switch day, so the switch has
+> records; only the CNAME below conflicted), then through the backend from the switch on
+> (`GATEWAY_ACME_DNS=mesh`, one env change per gateway, token deleted). The certificate exists on switch day, so the switch has
 > no untrusted-certificate window. Staging: nasselle + nss1 on gateway `1.12.0-acme-test`, Let's
 > Encrypt `*.inojob.com` until 2027-02-02; Cloudflare's edge certificate (Google Trust Services)
 > unchanged. Cost: a DNS-edit token (inojob.com only, IP-filtered to the gateways) on each gateway
@@ -339,8 +339,8 @@ before the certificate expires).
 
 | Part | Design |
 |---|---|
-| ACME client | `lego` with its acme-dns provider, beside the gateway (same container or a sidecar), one ACME account per gateway. Names: `*.<zone>` (dash names, reserved labels). The apex stays on Traefik (cutoff gate G5). |
-| Challenge | The backend's acme-dns API (`architecture.md` §7.2) gains a **per-gateway credential** whose only allowed name is `_acme-challenge.<zone>`, written to the apex zone on the hidden primary. Several TXT values coexist at that name (two gateways ordering in the same window), each deleted after 10 minutes like the user values. |
+| ACME client | `lego` in the gateway image (as built: its httpreq provider against the backend, `GATEWAY_ACME_DNS=mesh`), one ACME account per gateway. Names: `*.<zone>` (dash names, reserved labels). The apex stays on Traefik (cutoff gate G5). |
+| Challenge | The backend's httpreq routes (`/acme-dns/present`, `/cleanup`) accept the gateways' `GATEWAY_CERT_TOKEN` (as built: one token for all gateways, already there for the handoff certificate, instead of one credential per gateway) for `_acme-challenge.<zone>` only, written to the apex zone on the hidden primary (needs `DNS_STATIC_ZONE_FILE`). Several TXT values coexist at that name (two gateways ordering in the same window), each deleted after 10 minutes like the user values. |
 | Storage | The certificate and key live on the gateway's volume (the same one that keeps the mesh CA, `multi-gateway.md` open points), so a recreate during a backend outage still starts with them. |
 | Reload | After issue or renewal: nginx reload, no restart. |
 | CAA | The apex `CAA issue/issuewild "letsencrypt.org"` gets an `accounturi` per gateway account (cutoff-runbook §2 step 6), so only our gateways and Traefik can order for the zone. |
