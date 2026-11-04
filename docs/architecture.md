@@ -699,6 +699,14 @@ counts live zones the parent delegates to only part of the nameservers
 zone at start (nameserver image entrypoint), and `/dns/health`, now run every 2 min by the
 backend itself, re-NOTIFYs a zone a nameserver is still off after a minute.
 
+**Re-run (2026-11-03 17:12, backend 2.0.59, nameserver 1.3.3 on nss1, nss2 and the primary,
+`wisera NS nss2.inojob.com` added in Cloudflare; `mesh-cli dns status` shows "parent NS
+nss1.inojob.com, nss2.inojob.com").** nss1 stopped ~90 s with the same two changes:
+1.1.1.1 and 8.8.8.8 resolved uncached names through nss2 throughout (5 s query timeout),
+both changes reached the resolvers, HTTPS unaffected; nss1 restarted on the current
+serial (logged "catch-up after start, asked the primary for 8 zone(s)") at the first
+sample, ≤ 9 s after the start. **Passed.** Every step of the drill now passes.
+
 ### 13.3 Later phases
 
 2. **Batch delegation** (optional): Cloudflare NS records for users in batches (scripted
