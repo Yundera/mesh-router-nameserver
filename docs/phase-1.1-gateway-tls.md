@@ -25,7 +25,7 @@ through the acme-dns API) and one in the backend's Redis, served to every gatewa
 |---|---|---|---|
 | dash form | `immich-john.nsl.sh` | gateway (`*.<zone>`) | always; TLS terminated at the gateway, re-encrypted to the box |
 | dot form | `immich.john.nsl.sh` | box (`*.<user>.<zone>`) | only when there is no direct answer; **raw TLS passthrough**, never terminated |
-| user apex | `john.nsl.sh` | box (`<user>.<zone>`) | as dot form (see §7: the gateway's `*.<zone>` also matches it) |
+| user apex | `john.nsl.sh` | box (`<user>.<zone>`), gateway as fallback | passthrough while the box holds a trusted certificate; otherwise terminated with the gateway's `*.<zone>`, which matches it (§3.1, §7) |
 | reserved / static | `www.nsl.sh`, `router.nsl.sh` | gateway or its own service | terminated |
 
 Decisions behind it:
@@ -54,11 +54,35 @@ SNI under <zone>?
  ├─ no                                → terminate (default cert), as today
  ├─ first label under the zone is reserved (§3.4)  → terminate
  ├─ one label containing a dash       → dash form  → terminate with *.<zone>
+ ├─ user apex, no trusted box cert    → terminate with *.<zone> (apex fallback, §3.1)
  └─ otherwise (user apex, dot form)   → passthrough to that user's box
 ```
 
 Usernames cannot contain dashes (architecture.md §3.1), so a dashless single label is a
 user apex and never a dash name.
+
+### 3.1 Apex fallback (2026-11-04)
+
+The user apex is the box's dashboard, the name a user falls back to when something is
+wrong, so it must not depend on the box having obtained its certificate. The gateway's
+`*.<zone>` matches it (one label), unlike any dot name. Rule: **pass the apex through only
+while the backend's last probe found a browser-trusted certificate on the box**
+(`dns.certNotAfter` in `/resolve/v2`); otherwise (not probed yet, mesh CA certificate only,
+unreachable) terminate it with `*.<zone>` and forward it like a dash name. No `dns` block
+(a deployment without our nameservers) keeps the passthrough. Dot names are unchanged.
+
+Cost: none per request. The flag rides on the per-user decision the front already caches
+(`/resolve/v2`, 60 s), and the certificate state is the backend's stored probe (every
+10 min for live users, and right after a route registration), not a per-connection check.
+Switch-over: a box that obtains its certificate is passed through again within one probe
+interval plus the cache TTL; a rebuilt box falls back once its first registration is probed.
+
+Probe loop: a box behind NAT is probed *through* the gateway, which now presents its own
+`*.<zone>` on the apex. The probe therefore requires the apex certificate to name the apex
+exactly (a parent wildcard does not count), so the gateway can never vouch for the box.
+
+Found on demostaging1 (2026-11-04): a delegated demo box rebuilt every day never kept its
+apex certificate, so its landing URL failed at the TLS handshake through both gateways.
 
 **Passthrough:** `preread_by_lua` resolves the user's routes (same `/resolve/v2` data and
 cache as `resolver.lua`, cosockets are available in preread), picks the best route and
@@ -401,7 +425,8 @@ Limits, to say as plainly in the UI:
 
 - **dash names terminate at the gateway** by design: Yundera can read that traffic;
 - **the user apex** is matched by the gateway's `*.<zone>`: it is passed through by
-  policy, not provably (cookie note: with `<zone>` on the PSL, a cookie set for
+  policy, not provably, and only while the box holds a trusted certificate; without one
+  it terminates at the gateway (§3.1), like a dash name (cookie note: with `<zone>` on the PSL, a cookie set for
   `Domain=<user>.<zone>` reaches every dot app; AppShield and Authelia set host-only
   cookies);
 - **the network path is not the software supplier.** On a Yundera-managed box, Yundera

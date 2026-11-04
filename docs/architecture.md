@@ -235,9 +235,11 @@ an SNI router (OpenResty `stream` + `ssl_preread`), and the choice is syntactic:
    `<label>.box.<zone>`, verified against the mesh CA only.
 2. **Dot form and user apex → raw passthrough** to the box's best route (public IP or
    WireGuard address), with PROXY v2 for the client IP. TLS ends on the box; the
-   gateway holds no certificate for these names, so a box without its own certificate
+   gateway holds no certificate for dot names, so a box without its own certificate
    has no working dot names (dash names still work), and an offline box fails at the
-   handshake instead of showing an offline page.
+   handshake instead of showing an offline page. The user apex is the exception: while
+   the box has no trusted certificate the gateway terminates it with its `*.<zone>`
+   (apex fallback, `phase-1.1-gateway-tls.md` §3.1).
 
 No ACME challenge forwarding: dash names are never direct and dot names use DNS-01.
 
