@@ -308,6 +308,16 @@ non-delegated box the mesh CA.
 
 ## 6. The gateway's own certificate: `*.<zone>`
 
+> **Built and live on staging (2026-11-04), before the cutoff.** Decision of 2026-11-04 (Trello
+> #950): each gateway orders `*.<zone>` with lego from now on, the challenge TXT written through
+> **Cloudflare's API** while Cloudflare holds the zone (a TXT sits beside Cloudflare's own
+> records; only the CNAME below conflicted), then through our acme-dns from the switch on (one
+> env change per gateway, token deleted). The certificate exists on switch day, so the switch has
+> no untrusted-certificate window. Staging: nasselle + nss1 on gateway `1.12.0-acme-test`, Let's
+> Encrypt `*.inojob.com` until 2027-02-02; Cloudflare's edge certificate (Google Trust Services)
+> unchanged. Cost: a DNS-edit token (inojob.com only, IP-filtered to the gateways) on each gateway
+> host until the switch. Gateway README › "Public certificate".
+
 > **Deferred to the cutoff (decided 2026-10-27).** A `_acme-challenge.<zone>` CNAME in
 > Cloudflare would sit where Cloudflare's Universal SSL validates its own `*.<zone>` edge
 > certificate (TXT records it adds itself; a CNAME excludes other records at that name),
