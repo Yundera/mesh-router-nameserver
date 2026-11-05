@@ -24,13 +24,15 @@ through the acme-dns API) and one in the backend's Redis, served to every gatewa
 | Name | Example | Key holder | Through the gateway |
 |---|---|---|---|
 | dash form | `immich-john.nsl.sh` | gateway (`*.<zone>`) | always; TLS terminated at the gateway, re-encrypted to the box |
-| dot form | `immich.john.nsl.sh` | box (`*.<user>.<zone>`) | only when there is no direct answer; **raw TLS passthrough**, never terminated |
+| dot form | `immich.john.nsl.sh` | box (`*.<user>.<zone>`); each gateway a fallback `*.<user>.<zone>` (§6.3, gateway 1.15.0) | only when there is no direct answer; **raw TLS passthrough** while the box holds a trusted certificate, terminated with the gateway's fallback otherwise (§6.3) |
 | user apex | `john.nsl.sh` | box (`<user>.<zone>`), gateway as fallback | passthrough while the box holds a trusted certificate; otherwise terminated with the gateway's `*.<zone>`, which matches it (§3.1, §7) |
 | reserved / static | `www.nsl.sh`, `router.nsl.sh` | gateway or its own service | terminated |
 
 Decisions behind it:
 
-- **Option A (no fallback key for dot names).** A dot name works only while the box holds
+- **Option A (no fallback key for dot names)**, as built. *Replaced by gateway 1.15.0 when
+  `GATEWAY_FALLBACK_CERTS=on` (2026-11-05, Trello #966): a per-user gateway fallback
+  certificate for dot names, §6.3 and §7.* A dot name works only while the box holds
   its own Let's Encrypt certificate. The gateway has no certificate it could present for
   it. Consequences, accepted: a dot name of an offline box fails at the TLS handshake
   instead of showing the gateway's offline page; a delegated box that has not obtained
@@ -55,6 +57,8 @@ SNI under <zone>?
  ├─ first label under the zone is reserved (§3.4)  → terminate
  ├─ one label containing a dash       → dash form  → terminate with *.<zone>
  ├─ user apex, no trusted box cert    → terminate with *.<zone> (apex fallback, §3.1)
+ ├─ dot form, no trusted box cert,
+ │  fallback *.<user>.<zone> held      → terminate with it (§6.3)
  └─ otherwise (user apex, dot form)   → passthrough to that user's box
 ```
 
@@ -374,6 +378,55 @@ before the certificate expires).
 **Build:** once a zone we serve ourselves is available to test on (inojob.com after its
 NS switch, or a test zone), before the prod cutoff (gate G6). Until then nothing ships.
 
+### 6.3 Two CAs and per-user fallback certificates (2026-11-05, Trello #966)
+
+Built for gateway **1.15.0** / backend **2.0.62**. Dot names are to replace dash names
+(Trello #971), so a dot name must work whether or not the box holds its own certificate.
+
+**CAs.** Each gateway orders from a **primary** CA (`GATEWAY_ACME_SERVER`: ZeroSSL,
+`https://acme.zerossl.com/v2/DV90`, with EAB `GATEWAY_ACME_EAB_KID/_HMAC`, one EAB
+credential per gateway) and falls back to a **backup** (`GATEWAY_ACME_BACKUP_SERVER`: Let's
+Encrypt) only while the primary has no valid certificate for a name, at most
+`GATEWAY_ACME_BACKUP_WEEKLY_MAX` (10) new backup certificates a week. The zone's Let's
+Encrypt bucket (50 new certificates a week until the PSL entry) is the boxes'. Applies to
+`*.<zone>` (§6.1) and to the fallback certificates. Each CA has its own lego directory and
+account; a CA that forgets the account gets a new one, once.
+
+**Fallback certificates.** With `GATEWAY_FALLBACK_CERTS=on`, every gateway holds a
+`*.<user>.<zone>` per **live** user (`GET /gateway/fallback-labels`, gateway token: dormant
+zones get no challenge TXT and their dot names are asked by nobody). Ordered by DNS-01 through
+the backend's httpreq routes, which now accept the gateway token for live users'
+`_acme-challenge.<user>.<zone>` (counted per gateway, `ACME_GATEWAY_RATE_LIMIT`, 300/h; up to
+8 TXT values per name: the box's two plus the gateways'). No order at signup: a box's names
+go live with the zone, and install.sh / the orchestrator poll HTTPS before handing the box
+over (Trello #967).
+
+**Serving.** The front terminates a dot name when the user's decision says "no trusted box
+certificate" (`dns.certNotAfter` absent: the probe verifies the apex **and** the wildcard)
+and the gateway holds that user's file; otherwise it passes through as before. The HTTP TLS
+server picks `<user>.pem` by SNI (`fallback_certs.lua`), then forwards over the hop like a
+dash name (`<user>.box.<zone>`, mesh CA). The box always renders its dot routes, so the
+`Host` routes as is.
+
+**CAA.** A user zone with a CAA RRset (the box's Let's Encrypt accounts, §7) also lists
+`DNS_CAA_GATEWAY_ISSUERS` (`sectigo.com` for ZeroSSL, plus each gateway's Let's Encrypt
+`accounturi` for the backup); without them the zone's CAA refuses the gateways' orders. A
+zone without box accounts keeps no CAA at all. Whether ZeroSSL honours `accounturi` is
+unverified, so `sectigo.com` is listed plain (accepted, Trello #968).
+
+**Coverage gate.** Each gateway publishes what it holds at
+`/.well-known/mesh-gateway/fallback`; the backend reads it once a minute
+(`GatewayHealth.ts`) and compares it with the live users, counting a user once its zone has
+been live for `DNS_GATEWAY_FALLBACK_GRACE_MINUTES` (30; `dns.liveSince`, recorded from
+2.0.62) and a certificate only with more than a day left. `/dns/health` reports a
+gateway's coverage; with `DNS_GATEWAY_FALLBACK_REQUIRED=1` a gateway that misses users
+leaves the answers like a dead one (never the last: the answer fails open). Only with two
+gateways or more, like the rest of the health checks.
+
+**Not covered here:** the window in which DNS still answers a box that just lost its
+certificate (Trello #969), demo boxes in full gateway mode (#970), mesh-console's display
+of the fallback state (#968).
+
 ### 6.2 Earlier design (backend-issued, kept for the record)
 
 One Let's Encrypt certificate for `*.<zone>`, issued by the backend by DNS-01 (it
@@ -397,7 +450,34 @@ passthrough is live, and their Redis entries deleted.
 
 ## 7. What the user can verify
 
-The claim, stated precisely: **for a dot name, no certificate Yundera holds is valid.**
+> **Revised 2026-11-05 (Trello #966; built in gateway 1.15.0 / backend 2.0.62, §6.3).** Dash names are to be
+> deprecated, so dot names must never show an invalid certificate or make a user wait for
+> one. Each gateway will hold a fallback `*.<user>.<zone>` per user, ordered at signup
+> (ZeroSSL first, Let's Encrypt as backup), and terminate a user's dot names while the box
+> has no trusted certificate of its own (the §3.1 apex rule, extended to dot names). The
+> claim below therefore changes from "no certificate Yundera holds is valid for a dot name"
+> to:
+>
+> **Yundera holds a valid fallback certificate for your dot names and uses it only while
+> your box has none. Every connection shows which one you got.**
+>
+> How the user verifies it:
+> - **per connection**: the browser's certificate viewer shows the box's key (box
+>   `*.<user>.<zone>`, Let's Encrypt, key on the box) or the gateway's (the fallback,
+>   ZeroSSL or Let's Encrypt, key on the gateway);
+> - **mesh-console Certificates page**: the encryption path of each address form and who
+>   decrypts each leg, checked from outside; it gains a "gateway fallback" state for dot
+>   names (`split`, not `e2e`);
+> - **Certificate Transparency**: the gateway's fallback certificates are public like any
+>   other.
+>
+> The 2026-10-27 side note ("no transparency feature to build") is superseded: the
+> mesh-console page is the feature, and it must show the fallback state. CAA (below) stays,
+> but it also lists the gateways' accounts; it limits issuance to known accounts and no
+> longer proves that Yundera cannot obtain a certificate. The text below is the Option A
+> design, kept as the record of what is built today.
+
+The claim (Option A, as built), stated precisely: **for a dot name, no certificate Yundera holds is valid.**
 The gateway's `*.<zone>` matches one label only, so it cannot be presented for
 `immich.john.nsl.sh`. Reading that traffic would need a new certificate for a name
 under `john.<zone>`, and that is both restricted and public:
