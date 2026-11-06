@@ -234,7 +234,10 @@ Order:
 2. Backend: append the provider's URL to `TUNNEL_PROVIDERS`, the gateway's IP to
    `DNS_GATEWAY_IPS`, and `<gateway ip>=<range>=<provider url>` to `DNS_GATEWAY_TUNNELS`;
    recreate. Boxes on tunnel 1.5+ connect to the new provider within 5 min, and add the
-   gateway to their PROXY allow list within 30 min.
+   gateway to their PROXY allow list at their next zone tick (≤ 2 min) on mesh-router-caddy
+   ≥ 1.5.2. Older images apply it only at an unrelated caddy-docker-proxy generation: it
+   rebuilds only when the Caddyfile text it generates changes, and an `import` line never
+   does (the "within 30 min" seen on staging 2026-10-28 was luck).
 3. Failover drill: stop the gateway → `/dns/health` names it down and zones answer the
    others; stop the provider → it leaves NAT boxes' answers only; stop the backend → the
    gateway keeps serving names it has seen.

@@ -120,7 +120,10 @@ Decided 2026-10-28 (user), box side built the same day (unstaged):
   `servers :443` block) and the Caddyfile's global options import it by **glob**
   (`import /data/mesh-proxy*.caddy`): an image that does not write it yet only logs "No
   files matching import glob pattern", where a plain import would make caddy-docker-proxy
-  drop the block.
+  drop the block. A change after start (a gateway added to or removed from
+  `DNS_GATEWAY_IPS`) is loaded by mesh-router-caddy itself from 1.5.2 (`reload_generated`:
+  caddy-docker-proxy's autosaved Caddyfile adapted again and loaded), within one zone tick;
+  caddy-docker-proxy alone never sees it, since the `import` line does not change.
 - **Rollout, per box:** the box reports `PUT /hop/v1/proxy-protocol/:userid/:sig
   {enabled}` from its *running* config (admin API `listener_wrappers`), on change and every
   30 min; the backend keeps it 2 h (`hop:proxy:<uid>`) and `/resolve/v2` says
@@ -380,7 +383,9 @@ NS switch, or a test zone), before the prod cutoff (gate G6). Until then nothing
 
 ### 6.3 Two CAs and per-user fallback certificates (2026-11-05, Trello #966)
 
-Built for gateway **1.15.0** / backend **2.0.62**. Dot names are to replace dash names
+Built for gateway **1.15.0** / backend **2.0.62**. Live on staging (gateway 1.15.3, backend 2.0.64,
+coverage gate on) and prod (both gateways, 2026-11-06; first real fallback: the pilots mestio
+and chris, served by the gateways' ZeroSSL `*.<user>.nsl.sh` until their boxes hold their own). Dot names are to replace dash names
 (Trello #971), so a dot name must work whether or not the box holds its own certificate.
 
 **CAs.** Each gateway orders from a **primary** CA (`GATEWAY_ACME_SERVER`: ZeroSSL,
@@ -391,6 +396,16 @@ Encrypt) only while the primary has no valid certificate for a name, at most
 Encrypt bucket (50 new certificates a week until the PSL entry) is the boxes'. Applies to
 `*.<zone>` (§6.1) and to the fallback certificates. Each CA has its own lego directory and
 account; a CA that forgets the account gets a new one, once.
+
+**Bounded runs (gateway 1.15.3).** lego's own HTTP timeout is off by default, and on
+2026-11-06 a ZeroSSL validation call that never answered held nsp1's first order for over
+ten minutes, and with it the lock the `*.<zone>` and fallback loops share. Every lego call
+now has `--http-timeout` (`GATEWAY_ACME_HTTP_TIMEOUT`, 60 s) and runs under `timeout`
+(`GATEWAY_ACME_RUN_TIMEOUT`, 900 s, KILL 30 s later). A killed run cannot remove its
+challenge TXT; with the Cloudflare provider a leftover made the next order fail (the CA
+hands the same pending challenge back, Cloudflare refuses an identical record) and pushed
+that gateway to the Let's Encrypt backup, so the gateway deletes exactly the records the
+killed run created (IDs from lego's output) or logs a warning to delete them by hand.
 
 **Fallback certificates.** With `GATEWAY_FALLBACK_CERTS=on`, every gateway holds a
 `*.<user>.<zone>` per **live** user (`GET /gateway/fallback-labels`, gateway token: dormant
@@ -411,8 +426,12 @@ dash name (`<user>.box.<zone>`, mesh CA). The box always renders its dot routes,
 **CAA.** A user zone with a CAA RRset (the box's Let's Encrypt accounts, §7) also lists
 `DNS_CAA_GATEWAY_ISSUERS` (`sectigo.com` for ZeroSSL, plus each gateway's Let's Encrypt
 `accounturi` for the backup); without them the zone's CAA refuses the gateways' orders. A
-zone without box accounts keeps no CAA at all. Whether ZeroSSL honours `accounturi` is
-unverified, so `sectigo.com` is listed plain (accepted, Trello #968).
+zone without box accounts keeps no CAA at all. `sectigo.com` is listed plain: ZeroSSL issues
+through Sectigo, and Sectigo "does not currently support parameters that let domains further
+restrict issuance" (its CAA FAQ, checked 2026-11-06), so `accounturi` would be ignored, and
+RFC 8657 says a domain must not rely on it without the CA saying so. The cost, accepted
+(Trello #968): any ZeroSSL / Sectigo customer passes a user zone's CAA check, not only our
+gateways; the Let's Encrypt entries stay pinned per account.
 
 **Coverage gate.** Each gateway publishes what it holds at
 `/.well-known/mesh-gateway/fallback`; the backend reads it once a minute
@@ -424,8 +443,8 @@ leaves the answers like a dead one (never the last: the answer fails open). Only
 gateways or more, like the rest of the health checks.
 
 **Not covered here:** the window in which DNS still answers a box that just lost its
-certificate (Trello #969), demo boxes in full gateway mode (#970), mesh-console's display
-of the fallback state (#968).
+certificate (Trello #969), demo boxes in full gateway mode (#970). mesh-console shows the fallback state from 1.16.0
+(#968: "Decrypted by the mesh gateway (fallback)" on the dot name and the apex).
 
 ### 6.2 Earlier design (backend-issued, kept for the record)
 
