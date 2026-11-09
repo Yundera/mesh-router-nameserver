@@ -12,7 +12,7 @@
 | parent NS TTL (registry) | 172800 s (`.com`) | 3600 s (`.sh`) |
 | DNSSEC at the parent | none (`delegationSigned: false`; no DS, re-checked 2026-11-03) | none (no DS at `a0.nic.sh`; re-checked 2026-11-03) |
 | our NS (`DNS_NS_HOSTS`) | `nss1.inojob.com` 51.15.79.231, `nss2.inojob.com` 151.115.96.14 | `nsp1.nsl.sh` 51.15.79.11, `nsp2.nsl.sh` 151.115.97.163 |
-| gateways (`DNS_GATEWAY_IPS`) | 151.115.96.14, 51.15.79.231 | 151.115.97.163 |
+| gateways (`DNS_GATEWAY_IPS`) | 151.115.96.14, 51.15.79.231 | 151.115.97.163, 51.15.79.11 (G9, 2026-11-06) |
 | host of the backend, primary, Traefik | nasselle `ubuntu@151.115.96.14` | yundera-prod `ubuntu@151.115.97.163` |
 | config root | `/workspace/config/mesh-router-inojob/` | `/workspace/config/mesh-router-nsl/` |
 | static zone file | `backend/zone/inojob.com.zone` | `backend/zone/nsl.sh.zone` |
@@ -45,7 +45,7 @@ on `.sh`, up to two days on `.com`. Nothing is deleted on our side before §3 is
 | G9 | **≥ 2 gateways** in `DNS_GATEWAY_IPS`, on separate hosts (`architecture.md` §6, `multi-gateway.md`) | **Prod met 2026-11-06** (Trello #937): `DNS_GATEWAY_IPS=151.115.97.163,51.15.79.11`, `DNS_GATEWAY_TUNNELS` for both providers, handoff (`GATEWAY_PUBLIC_IP`) on both gateways, coverage gate on (`DNS_GATEWAY_FALLBACK_REQUIRED=1`); `/dns/health` ok with both gateways up, ZeroSSL, coverage 2/2; the delegated pilots answered with both IPs. Done before the switch, while only delegated users are answered by our nameservers. Boxes on mesh-router-caddy ≥ 1.5.2 take gateway 2 into their PROXY allow list within one tick; until then a box ignores its header (connection fine, client IP = the gateway's) |
 | G10 | **Glue registered** at the registrar: host objects for both NS names with their IPv4 (they sit inside the zone). Namecheap › Domain › Advanced DNS › Personal DNS Server; the domain's Nameservers setting stays on Cloudflare until §2 (pick **Custom** in the host dropdown, not `ns1`–`ns5`). **Met 2026-11-04**: `nss1.inojob.com` 51.15.79.231, `nss2.inojob.com` 151.115.96.14, `nsp1.nsl.sh` 51.15.79.11, `nsp2.nsl.sh` 151.115.97.163 | before §2: `curl -s https://rdap.verisign.com/com/v1/nameserver/nss1.inojob.com` (.com) / `https://rdap.identitydigital.services/rdap/nameserver/nsp1.nsl.sh` (.sh) = 200 with the IP, for each NS name; after §2: `dig +norec NS <zone> @<registry ns>` lists them with glue in ADDITIONAL |
 | G11 | **No DNSSEC** at the parent, and DNSSEC off in the Cloudflare zone. **Met 2026-11-04** on both zones: no DS at the parent, and no DNSKEY served by Cloudflare (it publishes one as soon as DNSSEC is enabled, even pending) | `dig +norec DS <zone> @<registry ns>` empty; `dig DNSKEY <zone>` empty |
-| G12 | **Cloudflare export saved** (BIND file, dated) next to the zone file | file present |
+| G12 | **Zone file committed** in the env's config repo, compared once with a Cloudflare export (BIND file) | the export holds no record missing from the zone file (the NS set, the proxied addresses and the user delegations aside). **Staging met 2026-11-09**: zone file committed (`ac8672a`), the day's export identical. A separate saved export was dropped (user decision 2026-11-09): the committed zone file is the reference |
 
 ### 0.1 G7: users at the switch
 
@@ -220,20 +220,56 @@ it as DNS: the apex, a dash name, a delegated user's apex and dot names, holyhor
      `mesh-cli dns sync <user>` to check now), and the box's Caddy log shows the DNS-01
      orders;
    - an agent and a tunnel box re-register (backend log), `ip.<zone>` still answers.
-6. **CAA at the apex**, now that Cloudflare no longer issues for the zone (Traefik and the
-   gateway use Let's Encrypt; user zones carry their own CAA):
+6. **Gateways: lego through our nameservers, Cloudflare token deleted.** Until now each
+   gateway's `*.<zone>` renews through Cloudflare's API (`GATEWAY_ACME_DNS=cloudflare`),
+   which writes into a zone nobody asks any more: the next renewal would fail. On each
+   gateway, config repo commit before, then in its compose env `GATEWAY_ACME_DNS=mesh`,
+   `GATEWAY_ACME_LEGO_ARGS=--dns.resolvers 1.1.1.1:53 --dns.resolvers 8.8.8.8:53`, and
+   drop `CLOUDFLARE_DNS_API_TOKEN` (compose and `.env`), `docker compose up -d`, commit
+   after + push. **The resolvers line is required:** lego finds the zone's authoritative
+   servers through the host's resolver, which may keep Cloudflare's NS set for up to a
+   day (child TTL 86400); it then waits on Cloudflare for the TXT, times out after 5 min
+   and falls back to the backup CA. Staging 2026-11-09: one of nss1's two Scaleway
+   resolvers still held it 20 h after the switch, so every order through it failed —
+   fallback certificates included, so set it in the same recreate. Then **force one
+   renewal on one gateway** to prove the path (the primary is ZeroSSL: no rate limit;
+   the certificate otherwise renews only 30 days before expiry):
+
+   ```bash
+   G=$(docker ps --format '{{.Names}}' | grep -i gateway | head -1)
+   # RENEW_DAYS above the days left (95 > 90: also forces a certificate renewed the same day)
+   docker exec $G sh -c '
+     export GATEWAY_STATE_DIR=/var/lib/mesh-gateway GATEWAY_ACME_RENEW_DAYS=95 GATEWAY_ACME_EMAIL=admin@<zone>
+     export LEGO_DNS=httpreq HTTPREQ_ENDPOINT=$BACKEND_URL/acme-dns HTTPREQ_USERNAME=$GATEWAY_PUBLIC_IP \
+            HTTPREQ_PASSWORD=$GATEWAY_CERT_TOKEN HTTPREQ_PROPAGATION_TIMEOUT=300
+     . /usr/local/lib/mesh-acme.sh
+     acme_obtain <zone> && set -- $(acme_best <zone>) &&
+     cp -f $2 /etc/nginx/certs/default.key && cp -f $1 /etc/nginx/certs/default.crt && openresty -s reload'
+   echo | openssl s_client -connect <gw ip>:443 -servername x-<user>.<zone> 2>/dev/null | openssl x509 -noout -startdate -enddate
+   ```
+
+   `GATEWAY_ACME_EMAIL` = the account directory under `acme/<CA host>/accounts/`. `lego
+   renew` may first sleep a random delay of up to 8 min. Delete the Cloudflare token in
+   the Cloudflare dashboard once both gateways run in `mesh` mode.
+7. **CAA at the apex**, now that Cloudflare no longer issues for the zone. Traefik orders
+   the apex from Let's Encrypt; the gateways order `*.<zone>` from ZeroSSL
+   (`sectigo.com`) with Let's Encrypt as their backup. User zones carry their own CAA
+   (`DNS_CAA_GATEWAY_ISSUERS`):
 
    ```
    @   CAA 0 issue "letsencrypt.org"
    @   CAA 0 issuewild "letsencrypt.org"
+   @   CAA 0 issuewild "sectigo.com"
    ```
 
-   added to the zone file, then `mesh-cli dns zone --dry-run` and wait one pass. Once
-   the gateways order their own `*.<zone>` (G6), narrow these to Traefik's and each
-   gateway's ACME account (`; accounturi=…`, `phase-1.1-gateway-tls.md` §6.1).
-7. **SendGrid**: Settings › Sender Authentication › the domain › Verify. Send a test
+   added to the zone file, then `mesh-cli dns zone --dry-run` and wait one pass. Without
+   `sectigo.com` the gateways' next ZeroSSL renewal is refused and they fall back to the
+   zone's Let's Encrypt bucket. Narrowing to `; accounturi=…` (`phase-1.1-gateway-tls.md`
+   §6.1) is possible for the Let's Encrypt lines only: Sectigo's support for it is
+   unverified (Trello #968).
+8. **SendGrid**: Settings › Sender Authentication › the domain › Verify. Send a test
    mail from a box and check DKIM=pass and DMARC=pass in the received headers.
-8. Inbound mail (G8, already on SendGrid Inbound Parse): send a mail to `contact@<zone>`
+9. Inbound mail (G8, already on SendGrid Inbound Parse): send a mail to `contact@<zone>`
    and check it is forwarded.
 
 ## 3. Drain (≥ 48 h after the switch)
@@ -257,7 +293,7 @@ zone, the Worker and its route untouched during the drain.
 
 - The Cloudflare zone stays until the rollback window is closed. Cloudflare deletes a
   zone whose nameservers have moved away after a few days in "Moved" status (check the
-  current delay before relying on it); the saved export (G12) is the fallback.
+  current delay before relying on it); the committed zone file (G12) is the fallback.
 - `mesh-router-gateway-cf` is retired: archive the repo, drop the deploy steps from the
   docs and the `cf-worker` trace segment from CLAUDE.md files.
 - Later, separately: DNSSEC (`architecture.md` §10.5, never in the same step as an NS
@@ -268,6 +304,55 @@ zone, the Worker and its route untouched during the drain.
 - `.com` parent NS TTL is 2 days: a rollback can take that long for some resolvers.
   Rehearse at a time when a slow rollback of `inojob.com` is acceptable.
 - Staging already runs two gateways (nasselle and nss1), so G9 is met there.
-- The staging backend container must be redeployed on an image ≥ 2.0.49 first (G1);
-  it currently runs another session's local build.
+- Staging runs published images: backend 2.0.64, gateways 1.15.3, nameservers 1.3.3
+  (read 2026-11-09).
+- Staging users that go live at the switch: every dormant zone (2026-11-09:
+  demostaging2, competentleopon, followingcaterpillar). Their apex and dot names fail TLS
+  until each box or gateway holds a certificate for them (the gateways' fallback
+  `*.<user>.<zone>` comes within minutes of going live). Accepted. competentleopon is the
+  NAT test box: always the gateways' answer.
 - Record what the rehearsal found in this file before scheduling prod.
+
+### 5.1 Pre-switch checks, 2026-11-09 (staging)
+
+- **G1–G11 re-read**: `dns zone --dry-run` no change; `dns zone diff` = only the NS set,
+  the gateway addresses, `ip` and user delegations; nss1 = nss2 serial `2026110602`;
+  `/dns/health` ok, both gateways ZeroSSL, coverage 2/2; `dns sync --prune --dry-run` no
+  orphan. G12: the day's Cloudflare export has every record of the zone file and
+  nothing more. All gates met.
+- **§1.4 dress rehearsal**, each name resolved at nss1 and nss2 and fetched with
+  `curl --resolve` (no `-k`) at every address they answered: apex `/router/api` and
+  `/dashboard` 200 (Traefik, Let's Encrypt); dash names of wisera, demostaging1,
+  demostaging2 through both gateways (ZeroSSL `*.inojob.com`); wisera and demostaging1
+  apex + dot names direct on the boxes' own Let's Encrypt certificates; MX, SendGrid
+  CNAMEs, DMARC served. Expected failures only: a dormant user's dot name (no
+  certificate before it is live) and `ip.<zone>` names (the box serves no public
+  certificate for them). competentleopon's 502 is the same through Cloudflare.
+  Cloudflare has no apex TXT either: staging never had an SPF record.
+- **Renewals**: none had run yet (every certificate under a week old). Forced on nss1
+  with `GATEWAY_ACME_RENEW_DAYS=89` (ZeroSSL): the fallback `*.wisera.inojob.com` through
+  the backend's acme-dns and our nameservers (the post-switch path), reinstalled by the
+  fallback loop within 60 s; the public `*.inojob.com` through Cloudflare, installed and
+  served (until 2027-02-07). The apex-zone `mesh` path can only be proven after the
+  switch (the CA asks Cloudflare until then): §2 step 6. Box certificates renew through
+  the same acme-dns path demostaging1 uses on every daily rebuild. Traefik: its daily
+  renewal check runs, and the HTTP-01 handler answers on `:80` straight at the host.
+
+### 5.2 Switch, 2026-11-09 (staging)
+
+- ~14:10 UTC: Namecheap NS → nss1/nss2. At 14:11 the `.com` registry already gave
+  nss1/nss2 with glue, 1.1.1.1 and 8.8.8.8 answered our NS; 9.9.9.9 still Cloudflare.
+- §2 step 5 passed: apex `/router/api` 200 without `-k`; dash names through both
+  gateways with no `cf-worker` segment; wisera + demostaging1 direct on their own
+  certificates; agents and tunnels re-registered; `ip.<zone>` and MX answered.
+- The 3 dormant users went live within minutes (one needed a re-check after a
+  resolver's cached Cloudflare answer expired); each got its fallback `*.<user>.<zone>`
+  from ZeroSSL on nasselle at once. `mesh-cli dns status` showed "parent NS none" for a
+  few of them until their next live check (answer stored before the switch): display
+  only.
+- Step 6: gateways on `mesh` (configs nss1 38cbe43, nasselle 60eef90). nss1's lego
+  orders failed on a stale host resolver (Cloudflare NS cached 20 h more) until
+  `GATEWAY_ACME_LEGO_ARGS` pointed the check at public resolvers (now in step 6); then
+  the fallback orders went through on ZeroSSL. Forced renewal on nasselle through our
+  nameservers: new ZeroSSL `*.inojob.com` until 2027-02-07, served after the reload.
+- Step 7: apex CAA added (config d789a1f), served by both NS.
