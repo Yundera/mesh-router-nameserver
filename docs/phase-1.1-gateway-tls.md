@@ -554,6 +554,17 @@ CAA as built (step 5, staging 2026-10-27):
   record prevents issuance); the next watcher tick (≤ 120 s) reported the new account;
   Caddy's retry obtained both certificates. 14:56:51 → 15:00:15 UTC, ~4 min including the
   passthrough list catching up. On a real rebuild the box has no certificate then anyway.
+  The refused round is not free: each one is a new order with new challenge values, the
+  retries come seconds apart when a config load cancels an order, Let's Encrypt's remote
+  perspectives then read a cached TXT (60 s TTL) without the new value ("Incorrect TXT
+  record", demostaging1 2026-11-12) and the failed authorizations (5/hour) run out.
+- **CAA first (mesh-router-caddy, after 1.6.0).** A delegated zone with no certificate in
+  storage stays on the not-delegated snippets (the gateway's fallback serves every name)
+  until the account Caddy registers at boot (root `<ip>.sslip.io` order) is reported and
+  accepted, plus `ZONE_CAA_SETTLE` (10 s); polled every 10 s, ordering anyway after
+  `ZONE_CAA_WAIT` (600 s). Measured on wisera 2026-11-12, same set-aside as above: no
+  `caa` error, both certificates at the first order, box serving its own certificate on the
+  dot name 46 s after Caddy started.
 - **Not covered.** The record is Yundera's to rewrite (owner of the zone): a change is
   public in DNS and logged (`[caa]` in the backend). A box still on mesh-router-caddy <
   the CAA release reports nothing: no CAA, as before.
